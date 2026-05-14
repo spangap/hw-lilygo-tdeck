@@ -1,0 +1,29 @@
+#!/bin/bash
+# rnsd-up — bring up the dev-loop rnsd against reticulous/.rns/.
+#
+# Idempotent re: config generation: copies the template into .rns/config
+# if it does not yet exist; otherwise leaves the operator's edits alone.
+# exec's rnsd so when invoked under `Bash run_in_background` the harness
+# can monitor the process directly.
+
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+HERE="$PWD"
+
+RNS_DIR="$HERE/.rns"
+TEMPLATE="$HERE/scripts/rnsd.config.template"
+RNSD="$HERE/research/.venv/bin/rnsd"
+
+if [[ ! -x "$RNSD" ]]; then
+    echo "rnsd-up: $RNSD missing — run 'make harness' first" >&2
+    exit 1
+fi
+
+mkdir -p "$RNS_DIR"
+if [[ ! -f "$RNS_DIR/config" ]]; then
+    cp "$TEMPLATE" "$RNS_DIR/config"
+    echo "rnsd-up: wrote $RNS_DIR/config from template" >&2
+fi
+
+exec "$RNSD" --config "$RNS_DIR" -vvv >> "$RNS_DIR/rnsd.log" 2>&1

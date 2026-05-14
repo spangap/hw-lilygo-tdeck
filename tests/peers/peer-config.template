@@ -1,0 +1,13 @@
+[reticulum]
+enable_transport = Yes
+share_instance = No
+
+[logging]
+loglevel = 6
+
+[interfaces]
+  [[Test TCP]]
+    type = TCPServerInterface
+    enabled = Yes
+    listen_ip = {listen_ip}
+    listen_port = {listen_port}

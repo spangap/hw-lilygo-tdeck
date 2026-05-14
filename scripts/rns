@@ -1,0 +1,62 @@
+#!/bin/bash
+# scripts/rns — invoke a Reticulum CLI against the dev-loop rnsd, or
+# manage its lifecycle.
+#
+# The plan calls for this at workspace-level devtools/rns (mirroring
+# devtools/flasher). It lives here for now because the harness can't
+# write to devtools/; symlink workspace-level devtools/rns -> this file
+# once devtools/ is writable.
+#
+# Usage:
+#   scripts/rns up                  → start the dev-loop rnsd (foreground; backgrounder expected)
+#   scripts/rns down                → kill the dev-loop rnsd
+#   scripts/rns log [-f]            → print/follow rnsd.log
+#   scripts/rns status              → rnstatus  (attaches as shared-instance client)
+#   scripts/rns path -t <hash>      → rnpath
+#   scripts/rns probe ...           → rnprobe
+#   scripts/rns cp ...              → rncp
+#   scripts/rns sh ...              → rnsh
+#
+# Everything that isn't a lifecycle subcommand is treated as a CLI tool
+# name to prefix with `rn` and exec inside the harness venv with
+# RNS_CONFIG_DIR pointing at reticulous/.rns.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RETICULOUS="$(cd "$SCRIPT_DIR/.." && pwd)"
+RNS_DIR="$RETICULOUS/.rns"
+VENV="$RETICULOUS/research/.venv"
+
+sub="${1:-status}"
+shift || true
+
+case "$sub" in
+    up)
+        exec "$RETICULOUS/scripts/rnsd-up" "$@"
+        ;;
+    down)
+        pkill -f "rnsd .*--config $RNS_DIR" || echo "rns: no matching rnsd running"
+        ;;
+    log)
+        if [[ "${1:-}" == "-f" ]]; then
+            exec tail -F "$RNS_DIR/rnsd.log"
+        fi
+        exec cat "$RNS_DIR/rnsd.log"
+        ;;
+    *)
+        bin="$VENV/bin/rn$sub"
+        if [[ ! -x "$bin" ]]; then
+            echo "scripts/rns: $bin not found — run 'make harness' from reticulous/ first" >&2
+            exit 1
+        fi
+        # RNS CLIs take --config rather than honoring RNS_CONFIG_DIR; inject ours
+        # unless the caller already passed one.
+        for a in "$@"; do
+            if [[ "$a" == "--config" || "$a" == --config=* ]]; then
+                exec "$bin" "$@"
+            fi
+        done
+        exec "$bin" --config "$RNS_DIR" "$@"
+        ;;
+esac
