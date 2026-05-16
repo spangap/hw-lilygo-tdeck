@@ -1,0 +1,75 @@
+#!/bin/bash
+# scripts/phasef-95 — autonomous Phase F §9.5 acceptance runner.
+#
+# Runs the remaining link.md §9.5 cases against the device
+# (lxmf.delivery e9904da9...) over the dev-loop TCP, with LoRa off
+# (pre-Phase-3 scaffold, unrelated). Emits one concise line per
+# milestone on stdout (so a Monitor keeps reporting even across API
+# hiccups) and writes full detail to .rns/phasef-95.log.
+#
+# Cases: oversize-reject, 10x64KB PSRAM soak, advertise-then-drop.
+set -u
+cd "$(dirname "$0")/.."
+DEV=e9904da9695d0394ab52d8e1fe25c0a5
+LOG=.rns/phasef-95.log
+: > "$LOG"
+say(){ echo "[$(date +%H:%M:%S)] $*"; echo "[$(date +%H:%M:%S)] $*" >> "$LOG"; }
+incount(){ diptych-cli "lxmf msgs" 2>/dev/null | grep -c " in "; }
+psmin(){ diptych-cli top 2>/dev/null | sed -n 's/.*PSRAM  free [0-9]* \/ [0-9]*  min \([0-9]*\).*/\1/p'; }
+runsend(){ # size timeout -> writes .rns/ps.out, returns send terminal line
+  rm -rf .rns/lxmf-send-storage; : > .rns/ps.out
+  ./scripts/lxmf-send "$DEV" --size "$1" --method direct --timeout "$2" >> .rns/ps.out 2>&1 &
+  echo $!
+}
+waitdone(){ # pid maxloops
+  local i=0
+  until grep -aqE "DELIVERED|FAILED transfer|TIMEOUT" .rns/ps.out 2>/dev/null; do
+    i=$((i+1)); [ "$i" -gt "$2" ] && break; sleep 4
+  done
+  grep -aE "DELIVERED|FAILED transfer|TIMEOUT" .rns/ps.out 2>/dev/null | tail -1
+}
+
+diptych-cli "lora down" >/dev/null 2>&1
+say "START phase-f §9.5 runner (LoRa off)"
+say "device $(diptych-cli date 2>/dev/null|tail -1)"
+
+# ---- Case: oversize reject (> s.lxmf.max_resource_size, default 262144) ----
+MAXR=$(diptych-cli "show s.lxmf.max_resource_size" 2>/dev/null | grep -oE '[0-9]+' | tail -1)
+MAXR=${MAXR:-262144}
+B=$(incount)
+say "OVERSIZE: max_resource_size=$MAXR baseline_in=$B; sending 300000B"
+P=$(runsend 300000 120); R=$(waitdone "$P" 40)
+sleep 3; A=$(incount)
+REJ=$(grep -aiE "> max .*rejecting|resource .* rejecting|max_resource" build/flasher.log | tail -1)
+if [ "$A" = "$B" ]; then
+  say "OVERSIZE: PASS (in-count unchanged $B->$A; send=$R; rnsd=[${REJ##*] }])"
+else
+  say "OVERSIZE: CHECK (in-count $B->$A; send=$R; rnsd=[${REJ##*] }])"
+fi
+
+# ---- Case: 10x 64KB soak, PSRAM HWM must stay flat ----
+PS0=$(psmin); B=$(incount)
+say "SOAK: start PSRAM_min=$PS0 baseline_in=$B"
+ok=0
+for n in $(seq 1 10); do
+  P=$(runsend 65536 180); R=$(waitdone "$P" 60)
+  ps=$(psmin); ic=$(incount)
+  case "$R" in *DELIVERED*) ok=$((ok+1));; esac
+  say "SOAK $n/10: $R in=$ic PSRAM_min=$ps"
+done
+PS1=$(psmin); A=$(incount)
+say "SOAK: done delivered=$ok/10 in=$B->$A PSRAM_min $PS0 -> $PS1 (flat=no-leak)"
+
+# ---- Case: advertise-then-drop -> FAILED, buffer freed ----
+PSb=$(psmin)
+say "DROP: PSRAM_min=$PSb; sending 65536B then killing mid-transfer"
+P=$(runsend 65536 120)
+sleep 12        # let it advertise + transfer some parts
+kill -9 "$P" 2>/dev/null; pkill -9 -f "scripts/lxmf-send" 2>/dev/null
+say "DROP: killed sender pid $P; waiting for device timeout/cleanup"
+sleep 70        # mR resource/link timeout
+FAILL=$(grep -aiE "resource inbound failed|resource .* (FAILED|CORRUPT)|link\[in.*failed" build/flasher.log | tail -1)
+PSa=$(psmin)
+say "DROP: rnsd=[${FAILL##*] }] PSRAM_min $PSb -> $PSa (recovered=no-leak)"
+
+say "DONE phase-f §9.5 runner"
