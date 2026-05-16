@@ -1,0 +1,113 @@
+#!/Volumes/code/diptych/reticulous/research/.venv/bin/python
+"""lxmf-echo — minimal LXMF receiver/echo running alongside the dev-loop rnsd.
+
+Joins the dev-loop rnsd as a shared-instance client (so it routes via
+TCPServerInterface[:4242], which the device is already dialed into),
+registers an `lxmf.delivery` destination under a fresh identity, announces
+periodically, and prints every inbound LXM. If `--echo` is given, also
+sends an opportunistic reply.
+
+Prints `READY <lxmf_dest_hash_hex>` on startup so an operator (or future
+fixture) can pick the hash out without grepping.
+
+Usage:
+    scripts/lxmf-echo [--display-name NAME] [--echo]
+"""
+
+import argparse
+import sys
+import threading
+import time
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+RNS_DIR = REPO / ".rns"
+
+import RNS  # noqa: E402
+import LXMF  # noqa: E402
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--display-name", default="builder-echo")
+    ap.add_argument("--echo", action="store_true",
+                    help="reply to each inbound LXM with 'echo: <content>'")
+    ap.add_argument("--opp", action="store_true",
+                    help="reply OPPORTUNISTIC (default is DIRECT, i.e. over a "
+                         "Link — what real LXMF peers do; needed to exercise "
+                         "the device's inbound-DIRECT path, plan §8.3)")
+    ap.add_argument("--announce-interval", type=float, default=30.0)
+    args = ap.parse_args()
+
+    RNS.Reticulum(configdir=str(RNS_DIR), loglevel=RNS.LOG_INFO)
+
+    router = LXMF.LXMRouter(storagepath=str(REPO / ".rns" / "lxmf-echo-storage"))
+    identity = RNS.Identity()
+    local_dest = router.register_delivery_identity(identity,
+                                                   display_name=args.display_name)
+
+    def _as_str(x) -> str:
+        # LXMessage's title/content can come back as either bytes or str
+        # depending on how the field was set on construction.
+        if isinstance(x, bytes):
+            return x.decode("utf-8", errors="replace")
+        return x or ""
+
+    def on_inbound(msg: "LXMF.LXMessage") -> None:
+        ts = time.strftime("%H:%M:%S")
+        src = msg.source_hash.hex() if msg.source_hash else "?"
+        title = _as_str(getattr(msg, "title", b"")).strip()
+        content = _as_str(getattr(msg, "content", b"")).strip()
+        print(f"[{ts}] LXM from {src} method={msg.transport_encryption} "
+              f"title={title!r} content={content!r}", flush=True)
+
+        if args.echo:
+            try:
+                source_ident = RNS.Identity.recall(msg.source_hash)
+                if source_ident is None:
+                    print(f"[{ts}] echo: no identity for {src}", flush=True)
+                    return
+                source_dest = RNS.Destination(
+                    source_ident,
+                    RNS.Destination.OUT,
+                    RNS.Destination.SINGLE,
+                    "lxmf", "delivery",
+                )
+                method = (LXMF.LXMessage.OPPORTUNISTIC if args.opp
+                          else LXMF.LXMessage.DIRECT)
+                reply = LXMF.LXMessage(
+                    source_dest, local_dest, f"echo: {content}",
+                    title="echo",
+                    desired_method=method,
+                )
+                router.handle_outbound(reply)
+                print(f"[{ts}] echoed back to {src} "
+                      f"({'opp' if args.opp else 'direct'})", flush=True)
+            except Exception as e:
+                print(f"[{ts}] echo failed: {e!r}", flush=True)
+
+    router.register_delivery_callback(on_inbound)
+
+    print(f"READY {local_dest.hash.hex()}", flush=True)
+
+    def announce_loop():
+        while True:
+            try:
+                local_dest.announce()
+                print(f"[{time.strftime('%H:%M:%S')}] announced "
+                      f"{local_dest.hash.hex()}", flush=True)
+            except Exception as e:
+                print(f"announce failed: {e!r}", flush=True)
+            time.sleep(args.announce_interval)
+
+    threading.Thread(target=announce_loop, daemon=True).start()
+
+    try:
+        while True:
+            time.sleep(60.0)
+    except KeyboardInterrupt:
+        return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

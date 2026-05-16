@@ -1,0 +1,110 @@
+#!/Volumes/code/diptych/reticulous/research/.venv/bin/python
+"""link-probe — open a Reticulum Link to a destination, log every transition.
+
+Used to exercise the device's incoming-Link path. Phase A regression case:
+pointed at a destination whose accepts_links is false, must time out at
+LR_ESTABLISH stage *without* growing the device's _pending_links table.
+
+Attaches to the dev-loop rnsd as a shared-instance client, so the test
+traffic egresses our TCPServerInterface[:4242] (which is what the device
+dialed in on) without a separate Reticulum stack.
+
+Usage:
+    scripts/link-probe <dest_hash_hex> [aspect ...]
+
+Default aspect is `lxmf delivery` (i.e. the device's `lxmf.delivery`
+destination). Aspects after the hash override that.
+"""
+
+import sys
+import time
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+RNS_DIR = REPO / ".rns"
+
+import RNS  # noqa: E402
+
+WAIT_PATH_S = 15.0
+LIFETIME_S = 20.0
+
+
+def main() -> int:
+    if len(sys.argv) < 2:
+        print(__doc__, file=sys.stderr)
+        return 2
+
+    remote_hash = bytes.fromhex(sys.argv[1])
+    aspects = sys.argv[2:] or ("lxmf", "delivery")
+
+    RNS.Reticulum(configdir=str(RNS_DIR), loglevel=RNS.LOG_INFO)
+
+    # Resolve identity AND ensure a live path. The dev-loop rnsd caches
+    # identities long-term but paths expire — recall() can succeed while
+    # there is no route, leaving the LR stuck at PENDING. Request a path
+    # whenever identity or path is missing.
+    identity = RNS.Identity.recall(remote_hash)
+    if identity is None or not RNS.Transport.has_path(remote_hash):
+        print(f"link-probe: requesting path to {remote_hash.hex()}", flush=True)
+        RNS.Transport.request_path(remote_hash)
+        deadline = time.monotonic() + WAIT_PATH_S
+        while time.monotonic() < deadline and (
+            identity is None or not RNS.Transport.has_path(remote_hash)
+        ):
+            time.sleep(0.2)
+            identity = RNS.Identity.recall(remote_hash)
+    if identity is None or not RNS.Transport.has_path(remote_hash):
+        print(f"link-probe: no path to {remote_hash.hex()} after {WAIT_PATH_S}s",
+              flush=True)
+        return 1
+
+    dest = RNS.Destination(
+        identity,
+        RNS.Destination.OUT,
+        RNS.Destination.SINGLE,
+        *aspects,
+    )
+
+    started_at = time.monotonic()
+
+    def stamp() -> str:
+        return f"{time.monotonic() - started_at:6.2f}s"
+
+    def on_established(link):
+        print(f"[{stamp()}] ESTABLISHED link_id={link.link_id.hex()} "
+              f"mtu={link.mtu} rtt={link.rtt:.3f}s", flush=True)
+
+    def on_closed(link):
+        reason = getattr(link, "teardown_reason", "?")
+        print(f"[{stamp()}] CLOSED reason={reason}", flush=True)
+
+    def on_packet(message, packet):
+        print(f"[{stamp()}] PKT {len(message)}B {message[:32].hex()}", flush=True)
+
+    print(f"[{stamp()}] opening Link aspects={'.'.join(aspects)} "
+          f"hash={remote_hash.hex()}", flush=True)
+    link = RNS.Link(
+        dest,
+        established_callback=on_established,
+        closed_callback=on_closed,
+    )
+    link.set_packet_callback(on_packet)
+
+    # Watch state for LIFETIME_S then tear down.
+    deadline = time.monotonic() + LIFETIME_S
+    last_status = None
+    while time.monotonic() < deadline:
+        status = link.status
+        if status != last_status:
+            print(f"[{stamp()}] status={status}", flush=True)
+            last_status = status
+        time.sleep(0.2)
+
+    print(f"[{stamp()}] tearing down", flush=True)
+    link.teardown()
+    time.sleep(0.5)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

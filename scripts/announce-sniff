@@ -1,0 +1,46 @@
+#!/Volumes/code/diptych/reticulous/research/.venv/bin/python
+"""announce-sniff — print every announce the dev-loop rnsd sees.
+
+Attaches to the dev-loop rnsd as a shared-instance client and registers
+a catch-all AnnounceHandler. One line per announce:
+
+    <dest_hash_hex>  <identity_hash_hex>  app_data=<...>
+
+Used to discover the hash of a device-hosted destination (e.g. the
+`rnsd clink listen <aspect>` test dest) so it can be link-probed.
+
+Usage: scripts/announce-sniff [seconds]   (default 20)
+"""
+import sys, time
+from pathlib import Path
+REPO = Path(__file__).resolve().parent.parent
+RNS_DIR = REPO / ".rns"
+import RNS  # noqa: E402
+
+
+import os
+
+class Sniff:
+    # Concrete aspect filter — catch-all (None) does not reliably fire
+    # for a shared-instance client. Override via $SNIFF_ASPECT.
+    aspect_filter = os.environ.get("SNIFF_ASPECT", "reticulous.linktest")
+    receive_path_responses = True
+
+    def received_announce(self, destination_hash, announced_identity,
+                           app_data):
+        ih = announced_identity.hash.hex() if announced_identity else "?"
+        print(f"{destination_hash.hex()}  id={ih}  app_data={app_data!r}",
+              flush=True)
+
+
+def main() -> int:
+    secs = float(sys.argv[1]) if len(sys.argv) > 1 else 20.0
+    RNS.Reticulum(configdir=str(RNS_DIR), loglevel=RNS.LOG_WARNING)
+    RNS.Transport.register_announce_handler(Sniff())
+    print(f"# sniffing announces for {secs:.0f}s", flush=True)
+    time.sleep(secs)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
