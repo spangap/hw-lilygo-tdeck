@@ -15,6 +15,8 @@ Usage:
 """
 
 import argparse
+import base64
+import os
 import sys
 import threading
 import time
@@ -36,10 +38,16 @@ def main() -> int:
                     help="reply OPPORTUNISTIC (default is DIRECT, i.e. over a "
                          "Link — what real LXMF peers do; needed to exercise "
                          "the device's inbound-DIRECT path, plan §8.3)")
+    ap.add_argument("--pad", type=int, default=0,
+                    help="append N bytes to the echo body so the reply "
+                         "exceeds one Link packet and rides a Resource "
+                         "(Phase F §9.5 inbound-Resource exercise)")
     ap.add_argument("--announce-interval", type=float, default=30.0)
     args = ap.parse_args()
 
-    RNS.Reticulum(configdir=str(RNS_DIR), loglevel=RNS.LOG_INFO)
+    RNS.Reticulum(configdir=str(RNS_DIR),
+                  loglevel=int(os.environ.get("ECHO_RNS_LOGLEVEL",
+                                              RNS.LOG_INFO)))
 
     router = LXMF.LXMRouter(storagepath=str(REPO / ".rns" / "lxmf-echo-storage"))
     identity = RNS.Identity()
@@ -75,8 +83,15 @@ def main() -> int:
                 )
                 method = (LXMF.LXMessage.OPPORTUNISTIC if args.opp
                           else LXMF.LXMessage.DIRECT)
+                body = f"echo: {content}"
+                if args.pad > 0:
+                    # Incompressible pad — bz2 is disabled on the device
+                    # (SF_COMPRESSION absent); compressible padding would
+                    # be bz2'd by upstream LXMF and dropped on receipt.
+                    body += " " + base64.b64encode(
+                        os.urandom(args.pad)).decode("ascii")
                 reply = LXMF.LXMessage(
-                    source_dest, local_dest, f"echo: {content}",
+                    source_dest, local_dest, body,
                     title="echo",
                     desired_method=method,
                 )
