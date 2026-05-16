@@ -1,0 +1,149 @@
+#!/Volumes/code/diptych/reticulous/research/.venv/bin/python
+"""lxmf-send — send one arbitrary-size LXM to a destination via the
+dev-loop rnsd (shared-instance client, same transport the device is
+dialed into).
+
+Phase F §9.5 driver: lets us push a >Link-packet message at the
+device's lxmf.delivery so the device exercises its *inbound* Resource
+path (the link.md §1 primary goal — real peers talking back), without
+needing the device to originate a big send (blocked by the device CLI
+input line cap, see project memory / Phase E note).
+
+Usage:
+    scripts/lxmf-send <dest_hash_hex> --size 16384 [--title T]
+                       [--method direct|opportunistic] [--timeout S]
+
+Prints one terminal line: DELIVERED / SENT / FAILED / TIMEOUT.
+"""
+
+import argparse
+import base64
+import os
+import sys
+import time
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+RNS_DIR = REPO / ".rns"
+
+import RNS  # noqa: E402
+import LXMF  # noqa: E402
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("dest", help="recipient lxmf.delivery hash (hex)")
+    ap.add_argument("--size", type=int, default=16384,
+                    help="body size in bytes (lorem-ish filler)")
+    ap.add_argument("--title", default="phasef")
+    ap.add_argument("--method", choices=["direct", "opportunistic"],
+                    default="direct")
+    ap.add_argument("--display-name", default="builder-sender")
+    ap.add_argument("--timeout", type=float, default=90.0)
+    args = ap.parse_args()
+
+    try:
+        dest_hash = bytes.fromhex(args.dest)
+    except ValueError:
+        print("FAILED bad dest hash", flush=True)
+        return 2
+    if len(dest_hash) != RNS.Reticulum.TRUNCATED_HASHLENGTH // 8:
+        print(f"FAILED dest hash must be "
+              f"{RNS.Reticulum.TRUNCATED_HASHLENGTH // 8} bytes", flush=True)
+        return 2
+
+    RNS.Reticulum(configdir=str(RNS_DIR),
+                  loglevel=int(os.environ.get("SEND_RNS_LOGLEVEL",
+                                              RNS.LOG_INFO)))
+
+    storagepath = REPO / ".rns" / "lxmf-send-storage"
+    # LXMF/RNS ratchet rotation persists under several roots depending
+    # on version; pre-create the ones it may touch (the rotation is
+    # flaky on a fresh tree and is non-essential for a one-shot send).
+    for d in (storagepath / "lxmf" / "ratchets",
+              Path(str(RNS_DIR)) / "storage" / "ratchets",
+              storagepath / "ratchets"):
+        os.makedirs(d, exist_ok=True)
+    router = LXMF.LXMRouter(storagepath=str(storagepath))
+    identity = RNS.Identity()
+    src_dest = router.register_delivery_identity(
+        identity, display_name=args.display_name)
+    # A one-shot sender does not need to be announced — the device
+    # receives the Resource over the Link we open to it. Announcing
+    # only triggers ratchet rotation, which is the flaky path.
+    try:
+        src_dest.announce()
+    except Exception as e:
+        print(f"announce skipped (non-fatal): {e!r}", flush=True)
+
+    # Resolve a path / identity for the recipient.
+    if not RNS.Transport.has_path(dest_hash):
+        RNS.Transport.request_path(dest_hash)
+        deadline = time.time() + 20
+        while not RNS.Transport.has_path(dest_hash) and time.time() < deadline:
+            time.sleep(0.5)
+    recipient_ident = RNS.Identity.recall(dest_hash)
+    if recipient_ident is None:
+        print("FAILED no path/identity for dest (announce the device's "
+              "lxmf.delivery first)", flush=True)
+        return 1
+
+    recipient = RNS.Destination(recipient_ident, RNS.Destination.OUT,
+                                RNS.Destination.SINGLE, "lxmf", "delivery")
+
+    # Truly incompressible body: our build has bz2 disabled
+    # (SF_COMPRESSION absent), so any payload bz2 can shrink would be
+    # compressed by upstream LXMF and (correctly) dropped on receipt.
+    # base64 is still ~21% compressible; raw random bytes are not, so
+    # LXMF's auto-compress finds no gain and sends them uncompressed —
+    # exercising the real Resource path (matches media attachments /
+    # SF-respecting peers). LXMF accepts bytes content.
+    body = os.urandom(args.size)
+
+    method = (LXMF.LXMessage.DIRECT if args.method == "direct"
+              else LXMF.LXMessage.OPPORTUNISTIC)
+    msg = LXMF.LXMessage(recipient, src_dest, body, title=args.title,
+                         desired_method=method)
+
+    state_name = {
+        LXMF.LXMessage.GENERATING: "GENERATING",
+        LXMF.LXMessage.OUTBOUND: "OUTBOUND",
+        LXMF.LXMessage.SENDING: "SENDING",
+        LXMF.LXMessage.SENT: "SENT",
+        LXMF.LXMessage.DELIVERED: "DELIVERED",
+        LXMF.LXMessage.FAILED: "FAILED",
+    }
+
+    done = {"v": False}
+
+    def delivered(_m):
+        print(f"DELIVERED {len(body)}B", flush=True)
+        done["v"] = True
+
+    def failed(_m):
+        print(f"FAILED transfer ({len(body)}B)", flush=True)
+        done["v"] = True
+
+    msg.register_delivery_callback(delivered)
+    msg.register_failed_callback(failed)
+    router.handle_outbound(msg)
+    print(f"sending {len(body)}B via {args.method} to {args.dest}", flush=True)
+
+    deadline = time.time() + args.timeout
+    last = None
+    while time.time() < deadline and not done["v"]:
+        s = state_name.get(msg.state, str(msg.state))
+        if s != last:
+            print(f"state={s}", flush=True)
+            last = s
+        time.sleep(0.5)
+
+    if not done["v"]:
+        print(f"TIMEOUT last_state="
+              f"{state_name.get(msg.state, msg.state)}", flush=True)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
