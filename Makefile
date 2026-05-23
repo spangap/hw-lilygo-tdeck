@@ -1,20 +1,9 @@
-# Consumer release-ceremony targets. The build itself runs through idf.py;
-# this Makefile is for operations that should NOT run on every build —
-# release-time only, so per-build images stay reproducible.
-
-.PHONY: timezones
-
-# Regenerate data/factory_state/storage/external/s.time.zones.json from the
-# IANA→POSIX mapping (network fetch). The script is platform-owned (lives in
-# diptych-core); the resulting file is consumer-owned and checked in with the
-# release. ETag cache goes to build/ so `idf.py fullclean` forces re-download.
-ZONES_SCRIPT := $(firstword $(wildcard \
-    ../diptych/diptych-core/scripts/update-zones.py \
-    managed_components/diptych__diptych-core/scripts/update-zones.py))
-
-timezones:
-	@test -n "$(ZONES_SCRIPT)" || { echo "update-zones.py not found (looked in diptych-core path: override and managed_components/)"; exit 1; }
-	python3 $(ZONES_SCRIPT) data --cache-dir build
+# Consumer dev/test targets. The build itself runs through idf.py; this Makefile
+# is for operations that must NOT run on every build (release/test ceremonies).
+#
+# Timezone data (s.time.zones.json) is now platform-owned: it lives in
+# diptych-core/data and ships here through the data merge. Refresh it with
+# `make timezones` in the diptych-core checkout, not here.
 
 # --- Test harness (Python Reticulum + LXMF + pytest) -------------------------
 # `make harness` clones the upstream Python references into research/ and
