@@ -65,7 +65,7 @@
     /* Home / centre button: GPIO 0 (the BOOT-strap pin, also the trackball
      * centre-press; shared with the mic, which reticulous never uses). Read as a
      * pulled-up active-low input after boot — tdeck.cpp exposes it to the lcd
-     * component, which makes a short press a click and a >=1s hold "go home". */
+     * component, which makes a short press a click and a >=300ms hold "go home". */
     #define BOARD_HOME_BTN_PIN      0
 
     /* BlackBerry-style optical trackball: four direction lines, each pulsing

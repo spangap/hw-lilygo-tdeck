@@ -154,7 +154,19 @@ static void backlightInit(void) {
     t.clk_cfg         = LEDC_USE_RC_FAST_CLK;
     ledc_timer_config(&t);
 
-    tdeckLcdBacklight(0);                        /* configures the channel */
+    /* Configure the channel exactly once — this is where GPIO42 gets reserved.
+     * Brightness changes afterwards are ledc_set_duty only (tdeckLcdBacklight),
+     * never another ledc_channel_config: re-running it re-reserves the pin and
+     * logs "GPIO 42 is not usable, maybe conflict with others" on every call. */
+    ledc_channel_config_t c = {};
+    c.gpio_num   = BOARD_LCD_BL_PIN;
+    c.speed_mode = BL_MODE;
+    c.channel    = BL_CH;
+    c.timer_sel  = BL_TIMER;
+    c.hpoint     = 0;
+    c.duty       = 0;                            /* start dark */
+    c.sleep_mode = LEDC_SLEEP_MODE_KEEP_ALIVE;
+    ledc_channel_config(&c);
 }
 
 static esp_lcd_panel_handle_t tdeckLcdInit(esp_lcd_panel_io_handle_t* ioOut,
@@ -227,27 +239,26 @@ static void tdeckLcdShutdown(void) {
     if (s_panel) esp_lcd_panel_disp_on_off(s_panel, false);
 }
 
-/* The lcd task holds no NO_LIGHT_SLEEP lock, so the backlight has to stay
- * correct while the chip light-sleeps. Off and full need no PWM: drive a
- * constant level and let the LEDC clock power down in sleep (the GPIO output
- * latch holds the level through light sleep). Intermediate levels PWM and are
- * kept alive across light sleep via the RC_FAST timer clock, so a dimmed screen
- * stays dimmed rather than freezing at a random duty phase. */
+/* Panel standby for the lcd component's inactivity blank (backlight is cut by lcd
+ * itself). disp_off retains GRAM, so wake is instant. The keyboard poll task is
+ * left running — it already idles at 5 Hz (POLL_IDLE), enough for a keypress to
+ * wake the screen via lcdNotifyActivity() in readCb. */
+static void tdeckDisplayPower(bool on) {
+    if (s_panel) esp_lcd_panel_disp_on_off(s_panel, on);
+}
+
+/* Brightness change only — the channel is already configured (backlightInit), so
+ * this is a plain duty update, no ledc_channel_config (which would re-reserve the
+ * GPIO and warn). The lcd task holds no NO_LIGHT_SLEEP lock, so the channel is
+ * KEEP_ALIVE (clocked from RC_FAST): a dimmed screen stays dimmed across light
+ * sleep rather than freezing at a random duty phase, and a constant 0/full level
+ * is held just the same. (The ESP32-S3 lacks SOC_LEDC_SUPPORT_SLEEP_RETENTION, so
+ * the lower-power NO_ALIVE_ALLOW_PD mode is rejected outright and there's no
+ * domain power-down to gain from anyway.) */
 static void tdeckLcdBacklight(uint8_t level) {
-    ledc_channel_config_t c = {};
-    c.gpio_num   = BOARD_LCD_BL_PIN;
-    c.speed_mode = BL_MODE;
-    c.channel    = BL_CH;
-    c.timer_sel  = BL_TIMER;
-    c.hpoint     = 0;
-    if (level == 0 || level == 255) {
-        c.duty       = level ? (1u << 8) : 0;   /* constant high / low (8-bit) */
-        c.sleep_mode = LEDC_SLEEP_MODE_NO_ALIVE_ALLOW_PD;
-    } else {
-        c.duty       = level;
-        c.sleep_mode = LEDC_SLEEP_MODE_KEEP_ALIVE;
-    }
-    ledc_channel_config(&c);
+    uint32_t duty = (level == 255) ? (1u << 8) : level;   /* 8-bit: 256 = true 100% */
+    ledc_set_duty(BL_MODE, BL_CH, duty);
+    ledc_update_duty(BL_MODE, BL_CH);
 }
 
 /* Shared I2C0 master bus — both the GT911 touch and the keyboard MCU live here.
@@ -335,7 +346,7 @@ static void tdeckButtonInit(void) {
     io.intr_type    = GPIO_INTR_ANYEDGE;   /* wake on both press and release */
     gpio_config(&io);
     /* lcdInputISR wakes the lcd task on each edge; buttonReadCb (event mode)
-     * turns press+release into a click and a >=1s hold into "go home". */
+     * turns press+release into a click and a >=300ms hold into "go home". */
     gpio_isr_handler_add((gpio_num_t)BOARD_HOME_BTN_PIN, lcdInputISR, nullptr);
 }
 
@@ -475,7 +486,8 @@ static void tdeckSettingsPane(void* arg) {
     lcdSettingSlider (p, "Pointer speed",    "s.tdeck.trackball_speed",      4, 40);
     lcdSettingSlider (p, "Cursor dwell (s)", "s.tdeck.pointer_visible_time", 1, 30);
     lcdSettingSection(p, "Display");
-    lcdSettingSlider (p, "Backlight",        "s.lcd.backlight",           0, 255);
+    lcdSettingSlider (p, "Backlight",        "s.lcd.backlight",              0, 255);
+    lcdSettingSlider (p, "Sleep after (s)",  "s.lcd.inactivity_timeout",     0, 120);
 }
 
 /* Register this board's HAL with the lcd component. Called from tdeckPreInit()
@@ -485,6 +497,7 @@ static void tdeckLcdRegister(void) {
         .init        = tdeckLcdInit,
         .shutdown    = tdeckLcdShutdown,
         .backlight   = tdeckLcdBacklight,
+        .display_power = tdeckDisplayPower,
         .touch_init  = tdeckTouchInit,
         .button_read = tdeckButtonRead,
         .pointer_read = tdeckPointerRead,
@@ -560,7 +573,12 @@ void readCb(lv_indev_t*, lv_indev_data_t* data) {
     if (s_queue && xQueueReceive(s_queue, &raw, 0) == pdTRUE && raw) {
         s_again = true;
         uint32_t k = mapAsciiKey(raw);
-        if (k) { data->key = k; data->state = LV_INDEV_STATE_PRESSED; held = k; return; }
+        if (k) {
+            /* Count the keystroke as activity (resets the inactivity blank timer).
+             * If it woke the screen, swallow it — the key only served to wake. */
+            if (lcdNotifyActivity()) { data->state = LV_INDEV_STATE_RELEASED; return; }
+            data->key = k; data->state = LV_INDEV_STATE_PRESSED; held = k; return;
+        }
     }
     data->state = LV_INDEV_STATE_RELEASED;
 }
