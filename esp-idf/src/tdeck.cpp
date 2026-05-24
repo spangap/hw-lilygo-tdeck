@@ -352,15 +352,21 @@ enum { TB_UP, TB_DOWN, TB_LEFT, TB_RIGHT, TB_N };
 static uint32_t          s_tbCount[TB_N] = {0};   /* guarded by s_tbMux, not volatile */
 static portMUX_TYPE      s_tbMux = portMUX_INITIALIZER_UNLOCKED;
 static int               s_ptrX = -1, s_ptrY = -1;   /* -1 = uninit → centre on first read */
-static int               s_tbSpeed = 16;              /* max px/pulse at full speed; s.tdeck.trackball_speed */
+static int               s_tbSpeed    = 16;           /* s.tdeck.trackball_speed:     px/pulse at a full flick */
+static int               s_tbAccelMin = 3;            /* s.tdeck.trackball_accel_min: pulses/s at/below which a tick = 1 px */
+static int               s_tbAccelMax = 18;           /* s.tdeck.trackball_accel_max: pulses/s at which full speed is reached */
+static int               s_tbSmoothMs = 150;          /* s.tdeck.trackball_smooth_ms: velocity EMA time constant */
 static int64_t           s_tbLastUs = 0;              /* last read time, for velocity */
 static float             s_tbVel = 0.0f;              /* smoothed pulse rate (pulses/sec) */
 
-/* Acceleration tunables (compile-time; dial on hardware). The pointer does
- * ~1 px/pulse when rolling slowly (precise clicks) and ramps linearly to
- * s_tbSpeed px/pulse once the smoothed pulse rate reaches TB_VEL_FULL. */
-#define TB_VEL_TAU_US 120000.0f   /* velocity smoothing time constant (~120 ms) */
-#define TB_VEL_FULL   150.0f      /* pulses/sec at which we hit full s_tbSpeed */
+/* Acceleration model. Every knob is an s.tdeck.* config key, tunable live over the
+ * CLI/browser (no sliders). The per-pulse step ramps linearly from 1 px when the
+ * smoothed pulse rate is at/below trackball_accel_min (a slow, deliberate roll → one
+ * pixel per tick) up to the full trackball_speed once it reaches trackball_accel_max
+ * (a fast flick). The rate is smoothed by a trackball_smooth_ms time-constant EMA so
+ * a single short gap during a slow roll can't spike one tick to full speed. Defaults
+ * (min 3 / max 18 pulses/s) are measured T-Deck Plus values; re-dial with the dbg
+ * line below (enable debug logging for the lcd task and roll once). */
 
 static void IRAM_ATTR tboxIsr(void* arg) {
     portENTER_CRITICAL_ISR(&s_tbMux);
@@ -387,13 +393,20 @@ static void tdeckTrackballInit(void) {
         gpio_isr_handler_add((gpio_num_t)l.pin, tboxIsr, (void*)(intptr_t)l.dir);
     }
 
-    /* reticulous owns the whole pointing device, so both pointer settings live in
-     * s.tdeck.*. Speed = px per pulse (cached, read in tdeckPointerRead; 4 =
-     * slowest, default 16 ≈ 4×). Dwell = seconds the cursor stays after activity
-     * (-1 = always); diptych owns the cursor but not this policy, so we push it in
-     * via lcdPointerSetVisibleMs. Both run on the lcd task — sub dispatches here. */
+    /* reticulous owns the whole pointing device, so its settings live in s.tdeck.*.
+     * trackball_speed is px/pulse at a full flick; accel_min/accel_max/smooth_ms tune
+     * the acceleration curve (see the model note above) — all live-tunable, no
+     * sliders. Dwell = seconds the cursor stays after activity (-1 = always); diptych
+     * owns the cursor but not this policy, so we push it in via lcdPointerSetVisibleMs.
+     * All run on the lcd task — the subs dispatch here. */
     storageDefault("s.tdeck.trackball_speed", s_tbSpeed);
     NOW_AND_ON_CHANGE("s.tdeck.trackball_speed", { s_tbSpeed = atoi(val); });
+    storageDefault("s.tdeck.trackball_accel_min", s_tbAccelMin);
+    NOW_AND_ON_CHANGE("s.tdeck.trackball_accel_min", { s_tbAccelMin = atoi(val); });
+    storageDefault("s.tdeck.trackball_accel_max", s_tbAccelMax);
+    NOW_AND_ON_CHANGE("s.tdeck.trackball_accel_max", { s_tbAccelMax = atoi(val); });
+    storageDefault("s.tdeck.trackball_smooth_ms", s_tbSmoothMs);
+    NOW_AND_ON_CHANGE("s.tdeck.trackball_smooth_ms", { s_tbSmoothMs = atoi(val); });
     storageDefault("s.tdeck.pointer_visible_time", 2);
     NOW_AND_ON_CHANGE("s.tdeck.pointer_visible_time",
                       { int s = atoi(val); lcdPointerSetVisibleMs(s < 0 ? -1 : s * 1000); });
@@ -413,8 +426,8 @@ static bool tdeckPointerRead(int* x, int* y) {
     /* Pointer acceleration. Smooth the pulse rate with a *time-decayed* EMA: a
      * short gap barely moves it (steady feel under a continuous roll), a long gap
      * decays it toward zero (so the first nudge after a pause is precise, not a
-     * leftover-velocity jump). Map the smoothed rate to a per-pulse step that
-     * ramps from 1 px (slow → pixel-precise) up to s_tbSpeed px (fast flick). */
+     * leftover-velocity jump). The smoothed rate then maps to a per-pulse step
+     * (below) that scales from 1 px up to the full trackball_speed. */
     int64_t now = esp_timer_get_time();
     int64_t dt  = now - s_tbLastUs;
     s_tbLastUs = now;
@@ -422,16 +435,29 @@ static bool tdeckPointerRead(int* x, int* y) {
 
     int   pulses = abs(dxp) + abs(dyp);
     float vinst  = (float)pulses * 1e6f / (float)dt;                       /* pulses/sec */
-    float decay  = TB_VEL_TAU_US / (TB_VEL_TAU_US + (float)dt);            /* 1 if fast, ~0 after a gap */
+    float tau    = (float)s_tbSmoothMs * 1000.0f;                          /* ms -> us */
+    float decay  = tau / (tau + (float)dt);                                /* ~1 under a roll, ->0 after a gap */
     s_tbVel = decay * s_tbVel + (1.0f - decay) * vinst;
 
-    float accel = s_tbVel / TB_VEL_FULL;
-    if (accel > 1.0f) accel = 1.0f;
+    /* 0 at/below accel_min (1 px/tick, precise), 1 at accel_max (full speed), linear
+     * between — so a slow roll is pixel-exact and a fast flick hits trackball_speed. */
+    float lo = (float)s_tbAccelMin, hi = (float)s_tbAccelMax;
+    if (hi <= lo) hi = lo + 1.0f;
+    float accel = (s_tbVel - lo) / (hi - lo);
+    if (accel < 0.0f) accel = 0.0f; else if (accel > 1.0f) accel = 1.0f;
     float step  = 1.0f + (float)(s_tbSpeed - 1) * accel;                   /* px per pulse */
 
     int dx = (int)lroundf((float)dxp * step);
     int dy = (int)lroundf((float)dyp * step);
     bool moved = (dx != 0 || dy != 0);
+
+    /* Tuning aid (dbg-gated, rate-limited): read the live pulse rate to set
+     * trackball_accel_min/max. Runs on the lcd task, so it logs under that tag. */
+    static int64_t s_tbDbgUs = 0;
+    if (pulses && now - s_tbDbgUs > 150000) {
+        s_tbDbgUs = now;
+        dbg("tball vel=%.0f/s accel=%.2f step=%.1f\n", (double)s_tbVel, (double)accel, (double)step);
+    }
 
     s_ptrX = std::clamp(s_ptrX + dx, 0, BOARD_LCD_H_RES - 1);
     s_ptrY = std::clamp(s_ptrY + dy, 0, BOARD_LCD_V_RES - 1);
