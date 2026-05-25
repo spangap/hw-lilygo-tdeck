@@ -90,6 +90,16 @@
     /* No external RX/TX RF switch; SX1262 drives DIO2 as the antenna switch. */
     #define BOARD_LORA_DIO2_RF_SWITCH 1
 
+    /* GNSS receiver — pre-soldered on the Plus, hard-wired to the Grove header.
+     * NMEA over UART 8N1. The chip is production-batch dependent: Quectel L76K
+     * (default 9600) or u-blox MIA-M10Q (default 38400) — no host-visible id, so
+     * gps.cpp autobauds and infers the model from the baud (docs/tdeck.md §1.3).
+     * Powered off the shared BOARD_POWER_EN_PIN rail (no independent GPS enable);
+     * PPS is not routed on the Plus. Host RX <- GPS TX = 44; host TX -> GPS RX = 43. */
+    #define BOARD_GPS_UART_NUM      1
+    #define BOARD_GPS_RX_PIN        44
+    #define BOARD_GPS_TX_PIN        43
+
 #else
     #error "Pick a board in menuconfig: Reticulous board → Target board"
 #endif

@@ -115,6 +115,7 @@ static void tdeckPeripheralPowerOff(void)
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include "esp_lcd_panel_io.h"
 #include "esp_lcd_panel_vendor.h"
@@ -283,6 +284,13 @@ static esp_lcd_touch_handle_t tdeckTouchInit(void) {
     i2c_master_bus_handle_t i2c = tdeckI2cBus();
     if (!i2c) return nullptr;
 
+    /* Multi-touch is opt-in and ephemeral: a consumer (e.g. the maps app) sets
+     * the runtime flag `tdeck.multi_touch` (no `s.` — not persisted, not a
+     * setting) while it wants gestures. Watch it and flip the generic lcd
+     * multipoint read mode. The GT911 is a 5-point controller. Runs on the lcd
+     * task (board HAL init), same as the trackball subs above. */
+    NOW_AND_ON_CHANGE("tdeck.multi_touch", { lcdTouchSetMultipoint(atoi(val) != 0); });
+
     esp_lcd_touch_config_t tcfg = {};
     /* Leave esp_lcd_touch IDENTITY and rotate the raw GT911 coords ourselves in
      * touchReadCb. esp_lcd_touch mirrors the raw (pre-swap) coords using
@@ -319,6 +327,9 @@ static esp_lcd_touch_handle_t tdeckTouchInit(void) {
         esp_lcd_touch_handle_t tp = nullptr;
         if (esp_lcd_touch_new_i2c_gt911(tio, &tcfg, &tp) == ESP_OK) {
             info("touch: GT911 ready @ 0x%02X\n", addr);
+            char tch[20];
+            snprintf(tch, sizeof(tch), "GT911 @ 0x%02X", addr);
+            storageSet("tdeck.touch", tch);   /* surfaced in the T-Deck settings pane */
             /* esp_lcd_touch configured GPIO16 as input; take it interrupt-driven
              * ourselves (ANYEDGE — GT911 INT polarity is sub-rev dependent, and a
              * redundant edge just costs one empty read). lcdInputISR wakes the lcd
@@ -331,6 +342,7 @@ static esp_lcd_touch_handle_t tdeckTouchInit(void) {
         esp_lcd_panel_io_del(tio);   /* free and try the other address */
     }
     warn("touch: GT911 not found at 0x5D or 0x14\n");
+    storageSet("tdeck.touch", "not found");
     return nullptr;
 }
 
@@ -482,6 +494,15 @@ static bool tdeckPointerRead(int* x, int* y) {
  * dwell and backlight are diptych's generic lcd keys, just surfaced here. */
 static void tdeckSettingsPane(void* arg) {
     lv_obj_t* p = (lv_obj_t*)arg;
+    /* Board probe results up top: which GPS receiver we found (gps.cpp) and
+     * whether the GT911 touch answered on I2C (set in tdeckTouchInit). */
+    lcdSettingSection(p, "Board");
+    lcdSettingValue  (p, "GPS",   "gps.model");
+    lcdSettingValue  (p, "Touch", "tdeck.touch");
+    lcdSettingSection(p, "GPS");
+    lcdSettingSwitch (p, "Enable",       "s.gps.enable");
+    lcdSettingSlider (p, "Interval (s)", "s.gps.interval", 1, 60);
+    lcdSettingValue  (p, "Status",       "gps.state");   /* "power-cycle to wake" etc. */
     lcdSettingSection(p, "Trackball");
     lcdSettingSlider (p, "Pointer speed",    "s.tdeck.trackball_speed",      4, 40);
     lcdSettingSlider (p, "Cursor dwell (s)", "s.tdeck.pointer_visible_time", 1, 30);

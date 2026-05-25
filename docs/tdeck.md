@@ -224,6 +224,21 @@ and `meshtastic/firmware/variants/esp32s3/t-deck/variant.h`.
   wired: the **first edge ever seen flips the reader from polling to
   interrupt-driven** (self-healing if a future C3 firmware drives it). See
   [§1.8](#18-reticulous-on-device-ui--how-we-wire-it).
+  **Path to interrupt-driven (C3-side fix):** the S3 needs *no* changes — the
+  self-healing ISR path above is already waiting for the edge; the fix is entirely
+  in the reflashable C3 ([§1.2](#12-t-deck-original--full-spec)). A corrected C3
+  firmware must drive `INT_PIN` **open-drain, active-low, level-held**: pull it LOW
+  whenever its key FIFO is non-empty and release it (high-Z — the S3's GPIO 46
+  pull-up restores HIGH) once a host read drains the FIFO to empty. Open-drain +
+  active-low matches the S3's pull-up; *level-held*, not a per-key pulse, is the
+  key choice — it's robust to a missed edge (the line just stays LOW until the host
+  has drained every key), and the `ANYEDGE` drain-loop already copes with both
+  transitions (falling → drain; the trailing rising edge after empty costs one
+  harmless empty read). The hole to fill is in `rgrizzell/lilygo-t-deck-keyboard`,
+  where `INT_PIN` is defined but never written. Caveat: reflashing replaces
+  LilyGo's stock keyboard firmware — recoverable (BOOT/RST are on the same 6-pin
+  header) but physical and per-board, so the poll path stays as the fallback for
+  un-reflashed units.
 - Buttons: physical RST (hardware), BOOT (= GPIO 0 = trackball
   click).
 
