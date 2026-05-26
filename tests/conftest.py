@@ -32,6 +32,7 @@ import pytest
 REPO = Path(__file__).resolve().parents[1]
 VENV_PY = REPO / "research" / ".venv" / "bin" / "python"
 ECHO_PEER = REPO / "tests" / "peers" / "echo_peer.py"
+NOMAD_PEER = REPO / "tests" / "peers" / "nomad_peer.py"
 READY_TIMEOUT_SEC = 15.0
 
 # Fixed loopback port the session-scoped `client_rns` dials into. The
@@ -89,13 +90,69 @@ def _drain(stream, label: str) -> threading.Thread:
     return t
 
 
-@pytest.fixture
-def peer(tmp_path: Path) -> Iterator:
-    """Factory fixture: `p = peer()` spawns a fresh echo peer.
+def _spawn_peer_proc(script: Path,
+                     tmp_path: Path,
+                     *,
+                     port: Optional[int],
+                     identity: Optional[str],
+                     bind: str,
+                     configdir: Optional[Path],
+                     label: Optional[str]) -> PeerHandle:
+    """Spawn a peer subprocess (`script` is echo_peer.py / nomad_peer.py —
+    they share the same CLI + READY sentinel), wait for READY, return a
+    PeerHandle. Shared by the `peer` and `nomad_peer` fixtures."""
+    port = port or DEFAULT_TEST_PEER_PORT
+    configdir = configdir or (tmp_path / f"peer-{port}")
+    configdir.mkdir(parents=True, exist_ok=True)
 
-    Defaults: random free port, fresh identity, loopback bind. Callers can
-    override `port`, `identity` (hex private bytes), `bind`, and
-    `configdir` (else a tmp subdir under tmp_path)."""
+    argv = [
+        str(VENV_PY), "-u", str(script),
+        "--port", str(port),
+        "--bind", bind,
+        "--configdir", str(configdir),
+    ]
+    if identity:
+        argv += ["--identity", identity]
+
+    proc = subprocess.Popen(
+        argv,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    label = label or f"{script.stem}:{port}"
+    stderr_drain = _drain(proc.stderr, label)
+
+    # Wait for the READY sentinel. The peer flushes it after announce.
+    deadline = time.monotonic() + READY_TIMEOUT_SEC
+    dest_hash: Optional[str] = None
+    while time.monotonic() < deadline:
+        line = proc.stdout.readline()
+        if not line:
+            # Subprocess exited before READY — bubble up stderr.
+            rc = proc.poll()
+            raise RuntimeError(
+                f"{script.name} exited (rc={rc}) before READY; see [{label}] stderr above"
+            )
+        decoded = line.decode(errors="replace").rstrip()
+        sys.stderr.write(f"[{label}] {decoded}\n")
+        if decoded.startswith("READY "):
+            dest_hash = decoded.split(" ", 1)[1]
+            break
+    if dest_hash is None:
+        proc.kill()
+        raise TimeoutError(f"{script.name} did not emit READY within {READY_TIMEOUT_SEC}s")
+
+    # Keep draining stdout in the background so the peer doesn't block.
+    threading.Thread(target=_drain_stdout,
+                     args=(proc.stdout, label), daemon=True).start()
+
+    return PeerHandle(dest_hash=dest_hash, port=port, proc=proc,
+                      configdir=configdir, _stderr_drain=stderr_drain)
+
+
+def _peer_factory_fixture(script: Path, tmp_path: Path) -> Iterator:
+    """Shared body for the `peer` / `nomad_peer` factory fixtures."""
     spawned: list[PeerHandle] = []
 
     def _spawn(*,
@@ -104,54 +161,8 @@ def peer(tmp_path: Path) -> Iterator:
                bind: str = "127.0.0.1",
                configdir: Optional[Path] = None,
                label: Optional[str] = None) -> PeerHandle:
-        port = port or DEFAULT_TEST_PEER_PORT
-        configdir = configdir or (tmp_path / f"peer-{port}")
-        configdir.mkdir(parents=True, exist_ok=True)
-
-        argv = [
-            str(VENV_PY), "-u", str(ECHO_PEER),
-            "--port", str(port),
-            "--bind", bind,
-            "--configdir", str(configdir),
-        ]
-        if identity:
-            argv += ["--identity", identity]
-
-        proc = subprocess.Popen(
-            argv,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        label = label or f"peer:{port}"
-        stderr_drain = _drain(proc.stderr, label)
-
-        # Wait for the READY sentinel. echo_peer flushes it after announce.
-        deadline = time.monotonic() + READY_TIMEOUT_SEC
-        dest_hash: Optional[str] = None
-        while time.monotonic() < deadline:
-            line = proc.stdout.readline()
-            if not line:
-                # Subprocess exited before READY — bubble up stderr.
-                rc = proc.poll()
-                raise RuntimeError(
-                    f"echo_peer exited (rc={rc}) before READY; see [{label}] stderr above"
-                )
-            decoded = line.decode(errors="replace").rstrip()
-            sys.stderr.write(f"[{label}] {decoded}\n")
-            if decoded.startswith("READY "):
-                dest_hash = decoded.split(" ", 1)[1]
-                break
-        if dest_hash is None:
-            proc.kill()
-            raise TimeoutError(f"echo_peer did not emit READY within {READY_TIMEOUT_SEC}s")
-
-        # Keep draining stdout in the background so the peer doesn't block.
-        threading.Thread(target=_drain_stdout,
-                         args=(proc.stdout, label), daemon=True).start()
-
-        handle = PeerHandle(dest_hash=dest_hash, port=port, proc=proc,
-                            configdir=configdir, _stderr_drain=stderr_drain)
+        handle = _spawn_peer_proc(script, tmp_path, port=port, identity=identity,
+                                  bind=bind, configdir=configdir, label=label)
         spawned.append(handle)
         return handle
 
@@ -159,6 +170,24 @@ def peer(tmp_path: Path) -> Iterator:
 
     for handle in spawned:
         handle.terminate()
+
+
+@pytest.fixture
+def peer(tmp_path: Path) -> Iterator:
+    """Factory fixture: `p = peer()` spawns a fresh echo peer.
+
+    Defaults: random free port, fresh identity, loopback bind. Callers can
+    override `port`, `identity` (hex private bytes), `bind`, and
+    `configdir` (else a tmp subdir under tmp_path)."""
+    yield from _peer_factory_fixture(ECHO_PEER, tmp_path)
+
+
+@pytest.fixture
+def nomad_peer(tmp_path: Path) -> Iterator:
+    """Factory fixture: `p = nomad_peer()` spawns a fresh Nomad Network
+    node peer (serves /page/index.mu on nomadnetwork.node). Same overrides
+    as `peer`."""
+    yield from _peer_factory_fixture(NOMAD_PEER, tmp_path)
 
 
 def _drain_stdout(stream, label: str) -> None:
