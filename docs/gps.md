@@ -59,9 +59,20 @@ covered by the 1.5 s listen window).
 |---|---|---|
 | `s.gps.enable` | `0` | gate: 1 runs the task, 0 puts the chip in standby and tears down the UART |
 | `s.gps.interval` | `1` | seconds between published `gps.*` snapshots |
+| `s.gps.ignore_clock` | `0` | 1 = never set the system clock from GPS |
 
 `s.gps.interval` only changes the publish cadence; the UART is still drained at
 ≤1 Hz regardless so the RX buffer can't overflow.
+
+## System clock from GPS
+
+A fresh fix (valid position **and** date+time) sets the system clock once per
+acquisition via `settimeofday()`, then publishes `sys.time.valid = 1` — the same
+flag NTP raises — so the status-bar clock and any time-gated logic work on a
+GPS-only device with no network. The fix time is UTC; the displayed wall time
+still follows `s.ntp.tz`. Times before 2025-01-01 are rejected as bogus, and the
+clock is re-disciplined on the next acquisition after a fix is lost. Set
+`s.gps.ignore_clock = 1` to leave the clock entirely to NTP / the browser.
 
 ## Published state (`gps.*`, ephemeral)
 

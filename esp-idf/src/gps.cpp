@@ -29,7 +29,11 @@
  * the UART non-blocking, fold every sentence into a working fix, and once
  * s.gps.interval seconds have elapsed publish the whole snapshot to gps.*.
  *
- * Config:    s.gps.enable (0/1), s.gps.interval (seconds)
+ * A fresh fix (valid date+time) disciplines the system clock — publishing the
+ * same sys.time.valid flag ntp uses, so a GPS-only device with no network still
+ * gets a wall clock — unless s.gps.ignore_clock is set.
+ *
+ * Config:    s.gps.enable (0/1), s.gps.interval (seconds), s.gps.ignore_clock (0/1)
  * Ephemeral: gps.model gps.baud gps.state gps.fix gps.quality gps.lat gps.lon
  *            gps.alt gps.geoid gps.speed gps.course gps.sats_used gps.sats_view
  *            gps.hdop gps.vdop gps.pdop gps.snr gps.utc gps.fix_age
@@ -43,6 +47,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include <time.h>
+#include <sys/time.h>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -100,6 +106,7 @@ static bool          s_needsPowerCycle = false;  /* L76K put in FORCE-pin-only b
 static GpsFix        s_fix;
 static std::string   s_line;               /* incremental NMEA line assembly */
 static int64_t       s_lastPublishUs = 0;
+static bool          s_clockSet = false;   /* system clock disciplined from the current fix session */
 
 /* ─────────────── NMEA helpers ─────────────── */
 
@@ -346,6 +353,42 @@ static void setF(const char* key, double v, int prec) {
     storageSet(key, b);
 }
 
+/* tm (UTC) -> Unix epoch. newlib ships no timegm, and mktime honours the
+ * device's configured TZ — so convert directly (days-from-civil, proleptic
+ * Gregorian; Howard Hinnant's algorithm). */
+static time_t utcToEpoch(const struct tm& t) {
+    int      y = t.tm_year + 1900;
+    unsigned m = t.tm_mon + 1;
+    unsigned d = t.tm_mday;
+    y -= m <= 2;
+    int64_t  era = (y >= 0 ? y : y - 399) / 400;
+    unsigned yoe = (unsigned)(y - era * 400);
+    unsigned doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+    unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    int64_t  days = era * 146097 + (int64_t)doe - 719468;
+    return (time_t)(days * 86400 + t.tm_hour * 3600 + t.tm_min * 60 + t.tm_sec);
+}
+
+/* Set the system clock from the current fix's UTC date+time. Publishes the same
+ * sys.time.valid flag ntp uses, so the status-bar clock lights up on a GPS-only
+ * device with no network. */
+static void gpsSetClock(void) {
+    struct tm tmv = {};
+    tmv.tm_year = s_fix.yr - 1900;
+    tmv.tm_mon  = s_fix.mo - 1;
+    tmv.tm_mday = s_fix.dy;
+    tmv.tm_hour = s_fix.hh;
+    tmv.tm_min  = s_fix.mi;
+    tmv.tm_sec  = s_fix.se;
+    time_t epoch = utcToEpoch(tmv);              /* fix time is UTC */
+    if (epoch < 1735689600) return;              /* before 2025-01-01 = bogus, ignore */
+    struct timeval tv = { .tv_sec = epoch, .tv_usec = 0 };
+    settimeofday(&tv, nullptr);
+    storageSet("sys.time.valid", 1);
+    info("clock set from GPS: %04d-%02d-%02d %02d:%02d:%02d UTC",
+         s_fix.yr, s_fix.mo, s_fix.dy, s_fix.hh, s_fix.mi, s_fix.se);
+}
+
 static void publishFix(void) {
     const char* fixStr = (s_fix.fixType >= 3) ? "3D"
                        : (s_fix.fixType == 2) ? "2D" : "none";
@@ -390,6 +433,17 @@ static void publishFix(void) {
         storageSet("gps.fix_age", -1);
     }
     storageEnd();
+
+    /* Discipline the system clock from a fresh fix — once per acquisition, and
+     * only if the user hasn't pinned it off via s.gps.ignore_clock. */
+    if (haveFix && s_fix.hasDate && s_fix.hasTime) {
+        if (!s_clockSet && !storageGetInt("s.gps.ignore_clock", 0)) {
+            gpsSetClock();
+            s_clockSet = true;
+        }
+    } else {
+        s_clockSet = false;   /* fix lost → re-discipline on the next acquisition */
+    }
 }
 
 static void publishModel(const char* state, const char* model, int baud) {
@@ -552,6 +606,7 @@ void gpsInit(void) {
     if (storageGetInt("s.gps.version", 0) < GPS_VERSION) {
         storageDefault("s.gps.enable", 0);
         storageDefault("s.gps.interval", 1);   /* seconds */
+        storageDefault("s.gps.ignore_clock", 0);   /* 1 = don't set the system clock from GPS */
         storageSet("s.gps.version", GPS_VERSION);
     }
     cliRegisterCmd("gps", cliGps);
