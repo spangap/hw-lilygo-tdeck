@@ -9,7 +9,7 @@ instance_control_port = 37429
 loglevel = 6
 
 [interfaces]
-  [[Diptych LAN TCP]]
+  [[Spangap LAN TCP]]
     type = TCPServerInterface
     enabled = Yes
     listen_ip = 0.0.0.0

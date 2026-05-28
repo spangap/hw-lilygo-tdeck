@@ -144,7 +144,7 @@ UART, then drops the UART:
 | `gps` | print status (state, model, baud, interval, position, fix, sats, DOP, UTC) |
 | `gps on` / `gps off` | set `s.gps.enable` |
 
-## On-device settings (`CONFIG_DIPTYCH_LCD`)
+## On-device settings (`CONFIG_SPANGAP_LCD`)
 
 GPS is surfaced in the board's own **T-Deck** Settings pane
 ([`tdeck.cpp`](../main/tdeck.cpp) `tdeckSettingsPane`), not a pane of its own:

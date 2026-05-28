@@ -2,8 +2,8 @@
 # is for operations that must NOT run on every build (release/test ceremonies).
 #
 # Timezone data (s.time.zones.json) is now platform-owned: it lives in
-# diptych-core/data and ships here through the data merge. Refresh it with
-# `make timezones` in the diptych-core checkout, not here.
+# spangap-core/data and ships here through the data merge. Refresh it with
+# `make timezones` in the spangap-core checkout, not here.
 
 # --- Test harness (Python Reticulum + LXMF + pytest) -------------------------
 # `make harness` clones the upstream Python references into research/ and

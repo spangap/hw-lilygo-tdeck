@@ -1,4 +1,4 @@
-#!/Volumes/code/diptych/reticulous/research/.venv/bin/python
+#!/Volumes/code/spangap/reticulous/research/.venv/bin/python
 """link-probe — open a Reticulum Link to a destination, log every transition.
 
 Used to exercise the device's incoming-Link path. Phase A regression case:

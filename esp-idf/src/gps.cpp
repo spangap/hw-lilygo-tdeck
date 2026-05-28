@@ -40,7 +40,7 @@
  */
 #include "gps.h"
 #include "tdeck.h"
-#include "diptych.h"
+#include "spangap.h"
 
 #include "driver/uart.h"
 #include "esp_timer.h"

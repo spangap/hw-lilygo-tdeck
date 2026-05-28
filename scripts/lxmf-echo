@@ -1,4 +1,4 @@
-#!/Volumes/code/diptych/reticulous/research/.venv/bin/python
+#!/Volumes/code/spangap/reticulous/research/.venv/bin/python
 """lxmf-echo — minimal LXMF receiver/echo running alongside the dev-loop rnsd.
 
 Joins the dev-loop rnsd as a shared-instance client (so it routes via

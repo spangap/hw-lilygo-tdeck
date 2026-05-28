@@ -1,4 +1,4 @@
-#!/Volumes/code/diptych/reticulous/research/.venv/bin/python
+#!/Volumes/code/spangap/reticulous/research/.venv/bin/python
 """announce-sniff — print every announce the dev-loop rnsd sees.
 
 Attaches to the dev-loop rnsd as a shared-instance client and registers

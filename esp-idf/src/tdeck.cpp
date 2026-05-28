@@ -6,10 +6,10 @@
  *
  *   1. Peripheral power rail + shared-SPI CS park + reset-on-off power-down.
  *      Always compiled — SD and LoRa need the +3.3 V rail even with no on-device
- *      UI. Driven from tdeckPreInit() before diptychInit().
- *   2. [CONFIG_DIPTYCH_LCD] ST7789V display + GT911 touch + trackball pointer +
+ *      UI. Driven from tdeckPreInit() before spangapInit().
+ *   2. [CONFIG_SPANGAP_LCD] ST7789V display + GT911 touch + trackball pointer +
  *      centre/Home button, registered as the lcd component's board HAL.
- *   3. [CONFIG_DIPTYCH_LCD] QWERTY keyboard (ESP32-C3 @ I2C 0x55), end to end.
+ *   3. [CONFIG_SPANGAP_LCD] QWERTY keyboard (ESP32-C3 @ I2C 0x55), end to end.
  *   4. The two-phase public API (tdeckPreInit / tdeckPostInit).
  */
 #include "tdeck.h"
@@ -23,16 +23,16 @@
  * 1. Peripheral power rail + shared-SPI CS park
  *
  * Board prerequisites for the very first shared-SPI-bus access — which is
- * fs_mount_sd() *inside* diptychInit(). Both MUST happen before that:
+ * fs_mount_sd() *inside* spangapInit(). Both MUST happen before that:
  *
  *  1. Peripheral power rail. T-Deck (Plus) gates the +3.3 V rail to the
  *     SD card (and display/GPS/LoRa) behind BOARD_POWER_EN_PIN. Until it's
  *     driven HIGH the SD card is unpowered, so esp_vfs_fat_sdspi_mount()
  *     just times out (ESP_ERR_TIMEOUT). loraInit() also asserts this, but
- *     that runs long after diptychInit() — far too late for the SD probe.
+ *     that runs long after spangapInit() — far too late for the SD probe.
  *  2. Idle CS park. The ST7789V shares the bus with no driver owning its
  *     CS yet; park it HIGH so it doesn't drive MISO during the SD/LoRa
- *     transactions. (Both go away when a display driver lands in diptych.)
+ *     transactions. (Both go away when a display driver lands in spangap.)
  *
  * Re-asserting the power pin in loraInit() is a harmless idempotent no-op.
  * ========================================================================= */
@@ -98,7 +98,7 @@ static void tdeckPeripheralPowerOff(void)
  *    centre/Home button (the lcd component's board HAL), and the QWERTY
  *    keyboard. Only compiled when the lcd module is enabled.
  * ========================================================================= */
-#if CONFIG_DIPTYCH_LCD
+#if CONFIG_SPANGAP_LCD
 
 #include "lcd_board.h"
 #include "lcd.h"
@@ -226,7 +226,7 @@ static esp_lcd_panel_handle_t tdeckLcdInit(esp_lcd_panel_io_handle_t* ioOut,
     tdeckButtonInit();
     tdeckTrackballInit();
     /* The keyboard (I2C 0x55 + GPIO46 INT + its LVGL indev) comes up in
-     * tdeckPostInit() after diptychInit() — it needs the lcd task to exist.
+     * tdeckPostInit() after spangapInit() — it needs the lcd task to exist.
      * It shares this bus via tdeckI2cBus(). */
 
     if (ioOut) *ioOut = io;
@@ -419,7 +419,7 @@ static void tdeckTrackballInit(void) {
     /* reticulous owns the whole pointing device, so its settings live in s.tdeck.*.
      * trackball_speed is px/pulse at a full flick; accel_min/accel_max/smooth_ms tune
      * the acceleration curve (see the model note above) — all live-tunable, no
-     * sliders. Dwell = seconds the cursor stays after activity (-1 = always); diptych
+     * sliders. Dwell = seconds the cursor stays after activity (-1 = always); spangap
      * owns the cursor but not this policy, so we push it in via lcdPointerSetVisibleMs.
      * All run on the lcd task — the subs dispatch here. */
     storageDefault("s.tdeck.trackball_speed", s_tbSpeed);
@@ -491,7 +491,7 @@ static bool tdeckPointerRead(int* x, int* y) {
 
 /* Built-in "T-Deck" Settings panel (root level): the trackball + display knobs
  * that are this board's own. trackball_speed is ours (s.tdeck.*); the cursor
- * dwell and backlight are diptych's generic lcd keys, just surfaced here. */
+ * dwell and backlight are spangap's generic lcd keys, just surfaced here. */
 static void tdeckSettingsPane(void* arg) {
     lv_obj_t* p = (lv_obj_t*)arg;
     /* Board probe results up top: which GPS receiver we found (gps.cpp) and
@@ -512,7 +512,7 @@ static void tdeckSettingsPane(void* arg) {
 }
 
 /* Register this board's HAL with the lcd component. Called from tdeckPreInit()
- * before diptychInit(). */
+ * before spangapInit(). */
 static void tdeckLcdRegister(void) {
     static const lcd_board_t ops = {
         .init        = tdeckLcdInit,
@@ -531,7 +531,7 @@ static void tdeckLcdRegister(void) {
  *
  * The keyboard is an ESP32-C3 MCU on the shared I2C0 bus (addr 0x55). Its quirks
  * make it a poor fit for the generic lcd input model, so it lives here in the
- * consumer rather than in diptych-core:
+ * consumer rather than in spangap-core:
  *   - GPIO46 is wired as a "key buffered" interrupt but the stock/rgrizzell C3
  *     firmware never drives it (verified on hardware and in the C3 source), so an
  *     INT-only path reads nothing.
@@ -649,7 +649,7 @@ void pollTask(void*) {
 
 }  // namespace
 
-/* Bring up the keyboard. Called from tdeckPostInit() AFTER diptychInit() — it
+/* Bring up the keyboard. Called from tdeckPostInit() AFTER spangapInit() — it
  * needs the lcd task to exist so it can create + drive its indev via lcdRun(). */
 static void tdeckKeyboardInit(void) {
     i2c_master_bus_handle_t bus = tdeckI2cBus();
@@ -683,10 +683,10 @@ static void tdeckKeyboardInit(void) {
     lcdSetHasKeyboard(true);                /* lcd: suppress the on-screen keyboard */
 }
 
-#endif /* CONFIG_DIPTYCH_LCD */
+#endif /* CONFIG_SPANGAP_LCD */
 
 /* =========================================================================
- * 4. Public API — two phases around diptychInit() (see tdeck.h).
+ * 4. Public API — two phases around spangapInit() (see tdeck.h).
  * ========================================================================= */
 
 void tdeckPreInit(void) {
@@ -694,13 +694,13 @@ void tdeckPreInit(void) {
 #if BOARD_POWER_EN_PIN >= 0
     resetOnOffSetPowerOff(tdeckPeripheralPowerOff);
 #endif
-#if CONFIG_DIPTYCH_LCD
+#if CONFIG_SPANGAP_LCD
     tdeckLcdRegister();                     /* display/touch/pointer HAL → lcd */
 #endif
 }
 
 void tdeckPostInit(void) {
-#if CONFIG_DIPTYCH_LCD
-    tdeckKeyboardInit();                    /* needs the lcd task diptychInit() made */
+#if CONFIG_SPANGAP_LCD
+    tdeckKeyboardInit();                    /* needs the lcd task spangapInit() made */
 #endif
 }

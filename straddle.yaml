@@ -1,0 +1,37 @@
+# reticulous-tdeck — app-straddle that builds the device image for the
+# LilyGo T-Deck Plus.
+#
+# Owns the T-Deck Plus board HAL (tdeck.cpp/h: power/CS/reset, display/
+# touch/trackball/button HAL, QWERTY keyboard) and the GNSS receiver task
+# (gps.cpp/h — board-specific until a GPS service abstraction earns its
+# own straddle). The partition layout, OTA pubkey, app_main (which drives
+# the explicit per-straddle init() sequence) and the Quasar browser SPA
+# shell all live here.
+schema_version: 1
+name: reticulous/reticulous-tdeck
+prefix: tdeck
+version: 0.1.0
+firmware: esp-idf
+browser: web-interface
+platforms: [idf]
+requires:
+  - reticulous/reticulous-core
+  - reticulous/reticulous-tcp
+  - reticulous/reticulous-auto
+  - reticulous/reticulous-espnow
+  - reticulous/reticulous-lora
+  - reticulous/reticulous-lxmf
+  - reticulous/reticulous-nomad
+  - reticulous/maps
+  - spangap/spangap-core
+  - spangap/spangap-net
+  - spangap/spangap-web
+  - spangap/spangap-lcd
+  - spangap/wg
+  - spangap/upnp
+  - spangap/duckdns
+  - spangap/acme
+  - spangap/ota
+app:
+  name: reticulous
+  partition_layout: partitions.csv

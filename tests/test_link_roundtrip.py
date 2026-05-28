@@ -19,7 +19,7 @@ import RNS
 from tests.fixed_keys import FIXED_KEYS
 
 
-APP_NAME = "diptych"
+APP_NAME = "spangap"
 ASPECTS = ("test", "echo")
 
 

@@ -1,4 +1,4 @@
-#!/Volumes/code/diptych/reticulous/research/.venv/bin/python
+#!/Volumes/code/spangap/reticulous/research/.venv/bin/python
 """lxmf-send — send one arbitrary-size LXM to a destination via the
 dev-loop rnsd (shared-instance client, same transport the device is
 dialed into).

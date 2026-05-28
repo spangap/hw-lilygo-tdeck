@@ -8,7 +8,7 @@
  *   - The board bring-up API (`tdeckPreInit` / `tdeckPostInit`). tdeck.cpp owns
  *     and starts everything board-specific: the peripheral power rail, the
  *     shared-SPI CS park, the reset-on-off power-down hook, and — when the lcd
- *     component is built (`CONFIG_DIPTYCH_LCD`) — the ST7789V display, GT911
+ *     component is built (`CONFIG_SPANGAP_LCD`) — the ST7789V display, GT911
  *     touch, trackball pointer, centre/Home button, and the ESP32-C3 QWERTY
  *     keyboard.
  *
@@ -47,7 +47,7 @@
      * + SD. CS=12; no dedicated reset (the panel resets with the +3.3 V rail
      * behind BOARD_POWER_EN_PIN), so the esp_lcd panel uses reset_gpio = -1.
      * tdeckPreInit() still parks CS HIGH at boot — needed before the SD probe,
-     * which runs (inside diptychInit) before lcdInit() claims the pin. */
+     * which runs (inside spangapInit) before lcdInit() claims the pin. */
     #define BOARD_LCD_CS_PIN        12
     #define BOARD_LCD_DC_PIN        11
     #define BOARD_LCD_BL_PIN        42      /* backlight (LEDC PWM) */
@@ -105,22 +105,22 @@
 #endif
 
 /**
- * Board bring-up — two phases around diptychInit():
+ * Board bring-up — two phases around spangapInit():
  *
- *   tdeckPreInit()   BEFORE diptychInit(). Drives the peripheral power rail HIGH
+ *   tdeckPreInit()   BEFORE spangapInit(). Drives the peripheral power rail HIGH
  *                    and parks the shared-SPI CS lines (the first shared-bus
- *                    access is fs_mount_sd() *inside* diptychInit()), installs the
+ *                    access is fs_mount_sd() *inside* spangapInit()), installs the
  *                    reset-on-off peripheral power-down hook, and — when built
- *                    with CONFIG_DIPTYCH_LCD — registers the display/touch/pointer
- *                    HAL so diptychInit()'s lcdInit() can bring the panel up.
+ *                    with CONFIG_SPANGAP_LCD — registers the display/touch/pointer
+ *                    HAL so spangapInit()'s lcdInit() can bring the panel up.
  *
- *   tdeckPostInit()  AFTER diptychInit(). Brings up the QWERTY keyboard, which
- *                    needs the lcd task diptychInit() created (CONFIG_DIPTYCH_LCD).
+ *   tdeckPostInit()  AFTER spangapInit(). Brings up the QWERTY keyboard, which
+ *                    needs the lcd task spangapInit() created (CONFIG_SPANGAP_LCD).
  *                    No-op otherwise.
  *
- * It can't collapse to one call: the power rail must be up before diptychInit()'s
+ * It can't collapse to one call: the power rail must be up before spangapInit()'s
  * SD probe and the HAL registered before its lcdInit(), but the keyboard needs
- * the lcd task that diptychInit() creates — so the bring-up straddles it.
+ * the lcd task that spangapInit() creates — so the bring-up straddles it.
  */
 void tdeckPreInit(void);
 void tdeckPostInit(void);

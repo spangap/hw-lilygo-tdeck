@@ -15,7 +15,7 @@ papered over.
 ## The `tdeck` module — what `tdeck.cpp` / `tdeck.h` provide
 
 `tdeck` is the single owner of all LilyGo T-Deck Plus hardware bring-up: the
-board layer beneath the diptych `lcd` UI component, and the home of everything
+board layer beneath the spangap `lcd` UI component, and the home of everything
 T-Deck-specific that the platform layer stays generic about.
 
 **Public surface (`tdeck.h`).** Two things:
@@ -27,21 +27,21 @@ T-Deck-specific that the platform layer stays generic about.
    driver code. Add a board = add a Kconfig `choice` entry + a constants block.
 2. **The bring-up API** — `tdeckPreInit()` and `tdeckPostInit()`.
 
-**Two-phase init (why it isn't one call).** Bring-up straddles `diptychInit()`:
+**Two-phase init (why it isn't one call).** Bring-up straddles `spangapInit()`:
 
 | Phase | When | Does |
 |---|---|---|
-| `tdeckPreInit()`  | **before** `diptychInit()` | drive the +3.3 V peripheral rail HIGH; park the shared-SPI CS lines (LCD + LoRa) so they don't drive MISO; install the reset-on-off power-down hook; *(CONFIG_DIPTYCH_LCD)* register the display/touch/pointer HAL with `lcd` |
-| *(diptychInit)* | — | mounts SD over the shared SPI bus (needs the rail + parked CS), then `lcdInit()` brings the panel up through the registered HAL (→ button + trackball init) |
-| `tdeckPostInit()` | **after** `diptychInit()` | *(CONFIG_DIPTYCH_LCD)* bring up the QWERTY keyboard — it needs the lcd task `diptychInit()` created |
+| `tdeckPreInit()`  | **before** `spangapInit()` | drive the +3.3 V peripheral rail HIGH; park the shared-SPI CS lines (LCD + LoRa) so they don't drive MISO; install the reset-on-off power-down hook; *(CONFIG_SPANGAP_LCD)* register the display/touch/pointer HAL with `lcd` |
+| *(spangapInit)* | — | mounts SD over the shared SPI bus (needs the rail + parked CS), then `lcdInit()` brings the panel up through the registered HAL (→ button + trackball init) |
+| `tdeckPostInit()` | **after** `spangapInit()` | *(CONFIG_SPANGAP_LCD)* bring up the QWERTY keyboard — it needs the lcd task `spangapInit()` created |
 
-It can't collapse to one call: the power rail must be up before `diptychInit()`'s
+It can't collapse to one call: the power rail must be up before `spangapInit()`'s
 first shared-bus access (`fs_mount_sd()`), the HAL must be registered before its
-`lcdInit()`, but the keyboard needs the lcd task `diptychInit()` creates.
-`main.cpp` is correspondingly thin — `tdeckPreInit(); diptychInit(); tdeckPostInit();`.
+`lcdInit()`, but the keyboard needs the lcd task `spangapInit()` creates.
+`main.cpp` is correspondingly thin — `tdeckPreInit(); spangapInit(); tdeckPostInit();`.
 
 **What it owns.** The power/CS/reset glue is always compiled (SD and LoRa need the
-rail even with no UI). Under `CONFIG_DIPTYCH_LCD` it additionally drives — and
+rail even with no UI). Under `CONFIG_SPANGAP_LCD` it additionally drives — and
 registers as the `lcd` board HAL:
 
 - **ST7789V display** (320×240, esp_lcd; LEDC-PWM backlight that survives light sleep)
@@ -57,8 +57,8 @@ registers as the `lcd` board HAL:
 (pointer speed 4–40) and `s.tdeck.pointer_visible_time` (cursor dwell seconds,
 `-1` = always). It also surfaces the generic `s.lcd.backlight`.
 
-The board-HAL contract itself (what `lcd` expects of any board) is diptych-core's
-`lcd_board.h` — see [`../../diptych/docs/lcd.md`](../../diptych/docs/lcd.md). The
+The board-HAL contract itself (what `lcd` expects of any board) is spangap-core's
+`lcd_board.h` — see [`../../spangap/docs/lcd.md`](../../spangap/docs/lcd.md). The
 deep wiring (the interrupt-driven indev model, the pointer-acceleration math, the
 keyboard's self-healing INT) is in **§1.8** below.
 
@@ -178,9 +178,9 @@ and `meshtastic/firmware/variants/esp32s3/t-deck/variant.h`.
   dedicated RST pin** (panel is reset by toggling `BOARD_POWERON`),
   `BOARD_TFT_BACKLIGHT = GPIO 42` (PWM-capable).
 - **Bus:** SPI2 shared, MOSI 41 / MISO 38 / SCK 40. Run at 40–80 MHz.
-- On reticulous this panel is driven by diptych-core's `lcd` LVGL component over
+- On reticulous this panel is driven by spangap-core's `lcd` LVGL component over
   `esp_lcd` — see [§1.8](#18-reticulous-on-device-ui--how-we-wire-it) for the
-  wiring and [../../diptych/docs/lcd.md](../../diptych/docs/lcd.md) for the UI.
+  wiring and [../../spangap/docs/lcd.md](../../spangap/docs/lcd.md) for the UI.
 
 #### Input devices
 
@@ -698,11 +698,11 @@ GPIO numbers refer to the host ESP32-S3 in all cases.
 
 ### 1.8 reticulous on-device UI — how we wire it
 
-The on-device UI is **diptych-core's `lcd` LVGL component** (launcher + status
-bar + built-in Settings), gated on `CONFIG_DIPTYCH_LCD` — not a reticulous widget
+The on-device UI is **spangap-core's `lcd` LVGL component** (launcher + status
+bar + built-in Settings), gated on `CONFIG_SPANGAP_LCD` — not a reticulous widget
 set. The software architecture (LVGL bring-up, the lcd task loop, the focus
 group, Settings panes, the board HAL contract) lives in
-[../../diptych/docs/lcd.md](../../diptych/docs/lcd.md). This section is only the
+[../../spangap/docs/lcd.md](../../spangap/docs/lcd.md). This section is only the
 **T-Deck Plus hardware wiring** behind that contract; the board layer is
 [../main/tdeck.cpp](../main/tdeck.cpp).
 
@@ -714,7 +714,7 @@ read back.
 
 **The lcd-owned input is interrupt-driven; the keyboard is the exception.**
 Touch, trackball and button indevs are `LV_INDEV_MODE_EVENT`, so LVGL runs no
-read timer for them. The board attaches diptych-core's exported `lcdInputISR` to
+read timer for them. The board attaches spangap-core's exported `lcdInputISR` to
 each INT line; the ISR does nothing but flag + `vTaskNotifyGiveFromISR` the lcd
 task (whose `itsPoll` blocks on that notification), which then reads the indev
 once. With nothing held, idle lcd CPU is **~0 %** (it pauses any released indev's
@@ -749,7 +749,7 @@ lcd task and bumps lcd via `lcdRun()`.
   precise. `TB_VEL_FULL` (pulses/sec for full speed) and `TB_VEL_TAU_US` are
   compile-time tunables in [tdeck.cpp](../main/tdeck.cpp); the slider sets
   the fast-end ceiling. **reticulous owns the whole pointing device** — both the
-  curve and the settings (`s.tdeck.*`). diptych-core stays generic: it only knows
+  curve and the settings (`s.tdeck.*`). spangap-core stays generic: it only knows
   the `pointer_read` HAL hook and draws the cursor — it owns no pointer config.
   reticulous pushes the cursor dwell in via `lcdPointerSetVisibleMs`
   (`s.tdeck.pointer_visible_time`, default 2 s, `-1` = always). The centre button
@@ -836,7 +836,7 @@ Things to flag:
 `lib/Crypto/` (Arduino Crypto by Rhys Weatherley) keeps its **MIT**
 license. AGPL changes the threat model: anyone serving Reticulum-
 mediated communications using ratdeck-derived code must offer source
-to remote users. Clean-room reimplementation against the diptych
+to remote users. Clean-room reimplementation against the spangap
 ESP-IDF tree side-steps this entirely; nobody on the team should
 copy-paste ratdeck source.
 
@@ -1147,10 +1147,10 @@ optimized from 9 seconds to ~100ms."** They had a phase early on
 where one full `loop()` iteration could take 9 s. That's what
 cooperative scheduling on top of `RNS::Transport` looks like when
 somebody adds a synchronous network call in the wrong place. For
-the diptych ESP-IDF reimplementation, this is the strongest lesson:
+the spangap ESP-IDF reimplementation, this is the strongest lesson:
 **co-locating the RNS pump, the radio driver, and the UI on a
 single cooperative task means every long-running call somewhere
-becomes a UI freeze and a missed LoRa packet.** The diptych/seccam
+becomes a UI freeze and a missed LoRa packet.** The spangap/seccam
 codebase already structures around explicit FreeRTOS tasks and
 event posting; do not regress to single-task cooperative just
 because mR encourages it.
@@ -1244,7 +1244,7 @@ normal operation.
   table) goes through the `LittleFSFileSystem` adapter — those
   files are mR's wire format (mix of msgpack and binary), not JSON.
 
-For diptych: the `IStorage` abstraction ratdeck's `FlashStore` /
+For spangap: the `IStorage` abstraction ratdeck's `FlashStore` /
 `SDStore` express maps cleanly to the existing seccam storage
 layer. JSON-per-message is operationally easy but inflates flash —
 ~200 bytes per message minimum even for small payloads. Worth
@@ -1493,7 +1493,7 @@ Things to take from ratdeck as architectural lessons:
 Things to *not* take:
 
 - Single-task cooperative everything. Use proper FreeRTOS tasks
-  like the rest of diptych/seccam does.
+  like the rest of spangap/seccam does.
 - Synchronous LVGL flush blocking the radio. Use a separate display
   task and a frame-buffer queue.
 - JSON-per-message storage (use msgpack / CBOR with a per-

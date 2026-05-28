@@ -4,7 +4,7 @@ Run as:
     python -m peers.echo_peer --port 37500 [--bind 127.0.0.1] [--identity HEX] [--configdir DIR]
 
 Brings up a Reticulum stack, listens on TCP, registers a SINGLE destination
-`diptych/test/echo`, and echoes any packet received on a Link back to the
+`spangap/test/echo`, and echoes any packet received on a Link back to the
 sender via `RNS.Packet(link, data).send()`. Prints
 
     READY <dest_hash_hex>
@@ -28,7 +28,7 @@ from pathlib import Path
 
 import RNS
 
-APP_NAME = "diptych"
+APP_NAME = "spangap"
 ASPECTS = ("test", "echo")
 
 

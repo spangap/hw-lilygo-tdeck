@@ -1,0 +1,31 @@
+dependencies:
+  idf:
+    version: ">=5.5"
+
+  # Platform straddles (spangap-core/-net/-web/-lcd, wg, upnp, duckdns, acme,
+  # ota) and reticulous feature straddles (reticulous-core, reticulous-tcp/
+  # -auto/-espnow/-lora, reticulous-lxmf, reticulous-nomad, maps) are NOT
+  # listed here. They're declared in straddle.yaml's `requires:` and staged
+  # at build time by `spangap make` into staging/components/<short>/, picked
+  # up via EXTRA_COMPONENT_DIRS. Listing them here too would double-stage
+  # them under the manager's namespaced `managed_components/<org>__<repo>/`
+  # form, causing duplicate-symbol link errors.
+  #
+  # The component manager doesn't recurse into locally-staged components'
+  # dependencies, so the app-straddle has to surface every third-party
+  # managed dep that any of its required straddles transitively uses
+  # (radiolib for reticulous-lora, LVGL/touch for spangap-lcd, esp_jpeg
+  # for reticulous/maps).
+
+  jgromes/radiolib:
+    version: "^7.0.0"
+  # On-device LCD UI (CONFIG_SPANGAP_LCD): LVGL v9 + GT911 touch. spangap-lcd
+  # links lvgl/esp_lcd_touch only when the lcd module is built; these
+  # managed deps satisfy that. esp_lcd_touch_gt911 pulls in esp_lcd_touch.
+  lvgl/lvgl:
+    version: "^9.2"
+  espressif/esp_lcd_touch_gt911:
+    version: "^1.1"
+  # JPEG tile decode for the on-device map (maps.cpp), TJpgDec-based.
+  espressif/esp_jpeg:
+    version: "^1.1"

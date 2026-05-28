@@ -14,8 +14,8 @@ DEV=e9904da9695d0394ab52d8e1fe25c0a5
 LOG=.rns/phasef-95.log
 : > "$LOG"
 say(){ echo "[$(date +%H:%M:%S)] $*"; echo "[$(date +%H:%M:%S)] $*" >> "$LOG"; }
-incount(){ diptych-cli "lxmf msgs" 2>/dev/null | grep -c " in "; }
-psmin(){ diptych-cli top 2>/dev/null | sed -n 's/.*PSRAM  free [0-9]* \/ [0-9]*  min \([0-9]*\).*/\1/p'; }
+incount(){ spangap-cli "lxmf msgs" 2>/dev/null | grep -c " in "; }
+psmin(){ spangap-cli top 2>/dev/null | sed -n 's/.*PSRAM  free [0-9]* \/ [0-9]*  min \([0-9]*\).*/\1/p'; }
 runsend(){ # size timeout -> writes .rns/ps.out, returns send terminal line
   rm -rf .rns/lxmf-send-storage; : > .rns/ps.out
   ./scripts/lxmf-send "$DEV" --size "$1" --method direct --timeout "$2" >> .rns/ps.out 2>&1 &
@@ -29,12 +29,12 @@ waitdone(){ # pid maxloops
   grep -aE "DELIVERED|FAILED transfer|TIMEOUT" .rns/ps.out 2>/dev/null | tail -1
 }
 
-diptych-cli "lora down" >/dev/null 2>&1
+spangap-cli "lora down" >/dev/null 2>&1
 say "START phase-f §9.5 runner (LoRa off)"
-say "device $(diptych-cli date 2>/dev/null|tail -1)"
+say "device $(spangap-cli date 2>/dev/null|tail -1)"
 
 # ---- Case: oversize reject (> s.lxmf.max_resource_size, default 262144) ----
-MAXR=$(diptych-cli "show s.lxmf.max_resource_size" 2>/dev/null | grep -oE '[0-9]+' | tail -1)
+MAXR=$(spangap-cli "show s.lxmf.max_resource_size" 2>/dev/null | grep -oE '[0-9]+' | tail -1)
 MAXR=${MAXR:-262144}
 B=$(incount)
 say "OVERSIZE: max_resource_size=$MAXR baseline_in=$B; sending 300000B"
