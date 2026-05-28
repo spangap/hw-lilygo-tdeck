@@ -1,6 +1,6 @@
 # License
 
-This repository, **reticulous-tdeck** (the consumer "app-straddle" that
+This repository, **reticulous-tdeck** (the consumer "buildable straddle" that
 bundles spangap + reticulous straddles into a flashable T-Deck S3 firmware
 image and a browser SPA), is released under the **Apache License,
 Version 2.0**.
@@ -36,7 +36,7 @@ vendored third-party sub-components with their own licenses:
 ### Firmware build-time dependencies
 
 Declared in `esp-idf/main/idf_component.yml`. The component manager does not
-recurse into locally-staged straddles, so this app-straddle surfaces every
+recurse into locally-staged straddles, so this buildable straddle surfaces every
 third-party managed dep used by any of the straddles it requires:
 
 | Component | Source | License |

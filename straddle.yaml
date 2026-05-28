@@ -1,4 +1,4 @@
-# reticulous-tdeck — app-straddle that builds the device image for the
+# reticulous-tdeck — buildable straddle that builds the device image for the
 # LilyGo T-Deck Plus.
 #
 # Owns the T-Deck Plus board HAL (tdeck.cpp/h: power/CS/reset, display/
@@ -32,6 +32,6 @@ requires:
   - spangap/duckdns
   - spangap/acme
   - spangap/ota
-app:
+buildable:
   name: reticulous
   partition_layout: partitions.csv

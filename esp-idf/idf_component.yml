@@ -12,7 +12,7 @@ dependencies:
   # form, causing duplicate-symbol link errors.
   #
   # The component manager doesn't recurse into locally-staged components'
-  # dependencies, so the app-straddle has to surface every third-party
+  # dependencies, so the buildable straddle has to surface every third-party
   # managed dep that any of its required straddles transitively uses
   # (radiolib for reticulous-lora, LVGL/touch for spangap-lcd, esp_jpeg
   # for reticulous/maps).
