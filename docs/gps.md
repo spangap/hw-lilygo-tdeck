@@ -66,12 +66,16 @@ covered by the 1.5 s listen window).
 
 ## System clock from GPS
 
-A fresh fix (valid position **and** date+time) sets the system clock once per
-acquisition via `settimeofday()`, then publishes `sys.time.valid = 1` — the same
-flag NTP raises — so the status-bar clock and any time-gated logic work on a
-GPS-only device with no network. The fix time is UTC; the displayed wall time
+A fresh fix (valid position **and** date+time) disciplines the system clock once
+per acquisition via `settimeofday()`, then publishes `sys.time.valid = 1` — the
+same flag NTP raises — so the status-bar clock and any time-gated logic work on
+a GPS-only device with no network. The fix time is UTC; the displayed wall time
 still follows `s.ntp.tz`. Times before 2025-01-01 are rejected as bogus, and the
-clock is re-disciplined on the next acquisition after a fix is lost. Set
+clock is re-disciplined on the next acquisition after a fix is lost. The actual
+`settimeofday()` only fires if the system clock is **≥ 2 s off** from the GPS
+time — a step is not a slew, and re-jamming whole-second NMEA precision on top
+of an already-good clock would just produce small non-monotonic jumps;
+`sys.time.valid` is still set in the within-tolerance case. Set
 `s.gps.ignore_clock = 1` to leave the clock entirely to NTP / the browser.
 
 ## Published state (`gps.*`, ephemeral)

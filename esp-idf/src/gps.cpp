@@ -382,11 +382,22 @@ static void gpsSetClock(void) {
     tmv.tm_sec  = s_fix.se;
     time_t epoch = utcToEpoch(tmv);              /* fix time is UTC */
     if (epoch < 1735689600) return;              /* before 2025-01-01 = bogus, ignore */
+    /* Skip if we're already within 2 s — settimeofday is a step, not a slew,
+     * so a small correction would make the wall clock jump non-monotonically
+     * (and we'd just be re-jamming whole-second NMEA precision on top of a
+     * clock that's already as good as we can do). Still publish sys.time.valid
+     * so downstream consumers know the time is trusted. */
+    time_t nowSec = time(nullptr);
+    time_t delta = epoch - nowSec; if (delta < 0) delta = -delta;
+    if (delta < 2) {
+        storageSet("sys.time.valid", 1);
+        return;
+    }
     struct timeval tv = { .tv_sec = epoch, .tv_usec = 0 };
     settimeofday(&tv, nullptr);
     storageSet("sys.time.valid", 1);
-    info("clock set from GPS: %04d-%02d-%02d %02d:%02d:%02d UTC",
-         s_fix.yr, s_fix.mo, s_fix.dy, s_fix.hh, s_fix.mi, s_fix.se);
+    info("clock set from GPS: %04d-%02d-%02d %02d:%02d:%02d UTC (was off by %lds)",
+         s_fix.yr, s_fix.mo, s_fix.dy, s_fix.hh, s_fix.mi, s_fix.se, (long)delta);
 }
 
 static void publishFix(void) {
