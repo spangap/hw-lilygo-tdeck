@@ -14,16 +14,17 @@ dependencies:
   # The component manager doesn't recurse into locally-staged components'
   # dependencies, so the buildable straddle has to surface every third-party
   # managed dep that any of its required straddles transitively uses
-  # (radiolib for reticulous-lora, LVGL/touch for spangap-lcd, esp_jpeg
-  # for reticulous/maps).
+  # (radiolib for reticulous-lora, esp_jpeg for reticulous/maps). LVGL is
+  # the exception — it's a registry component, not a straddle, so it's
+  # pinned in spangap-lcd's own idf_component.yml and reaches us through
+  # the normal managed-component recursion.
 
   jgromes/radiolib:
     version: "^7.0.0"
-  # On-device LCD UI (CONFIG_SPANGAP_LCD): LVGL v9 + GT911 touch. spangap-lcd
-  # links lvgl/esp_lcd_touch only when the lcd module is built; these
-  # managed deps satisfy that. esp_lcd_touch_gt911 pulls in esp_lcd_touch.
-  lvgl/lvgl:
-    version: "^9.2"
+  # On-device LCD UI (CONFIG_SPANGAP_LCD): GT911 touch driver for the board
+  # HAL. LVGL itself is pinned by spangap-lcd. esp_lcd_touch_gt911 pulls in
+  # esp_lcd_touch transitively, which spangap-lcd's CMakeLists.txt links
+  # against under CONFIG_SPANGAP_LCD.
   espressif/esp_lcd_touch_gt911:
     version: "^1.1"
   # JPEG tile decode for the on-device map (maps.cpp), TJpgDec-based.

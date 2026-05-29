@@ -25,13 +25,17 @@ requires:
   - reticulous/maps
   - spangap/spangap-core
   - spangap/spangap-net
-  - spangap/spangap-web
-  - spangap/spangap-lcd
   - spangap/wg
   - spangap/upnp
   - spangap/duckdns
   - spangap/acme
   - spangap/ota
+optional_requires:
+  # Drop with `spangap build --no-lcd` / `--no-web`. Source code in main/ and
+  # in any straddle that integrates with these gates on CONFIG_SPANGAP_LCD /
+  # CONFIG_SPANGAP_WEB, so absence compiles away.
+  - spangap/spangap-lcd
+  - spangap/spangap-web
 buildable:
   name: reticulous
   partition_layout: partitions.csv
