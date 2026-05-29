@@ -50,4 +50,9 @@ project(reticulous)
 # (one level up — the straddle layout has them as siblings of esp-idf/).
 spangap_browser_build("${CMAKE_SOURCE_DIR}/../web-interface")
 spangap_create_factory_image(fixed_a DATA_DIR "${CMAKE_SOURCE_DIR}/../data")
-spangap_lcd_icons(SRC_DIR "${CMAKE_SOURCE_DIR}/../assets/lcd-icons")
+# spangap_lcd_icons() lives in spangap-lcd's project_include.cmake, so it
+# only exists when that straddle is staged. A --no-lcd build skips the
+# rasterizer entirely (there are no LCD icons to ship without the launcher).
+if(COMMAND spangap_lcd_icons)
+    spangap_lcd_icons(SRC_DIR "${CMAKE_SOURCE_DIR}/../assets/lcd-icons")
+endif()
