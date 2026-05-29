@@ -48,8 +48,11 @@ project(reticulous)
 
 # Browser SPA and LCD icon assets live alongside the esp-idf/ project dir
 # (one level up — the straddle layout has them as siblings of esp-idf/).
+# spangap_create_factory_image() / spangap_lcd_icons() default their PARTITION
+# argument to ${SPANGAP_FIXED_PARTITION} (set by bootstrap.cmake to fixed_a
+# when OTA is on, fixed when OTA is off).
 spangap_browser_build("${CMAKE_SOURCE_DIR}/../web-interface")
-spangap_create_factory_image(fixed_a DATA_DIR "${CMAKE_SOURCE_DIR}/../data")
+spangap_create_factory_image(DATA_DIR "${CMAKE_SOURCE_DIR}/../data")
 # spangap_lcd_icons() lives in spangap-lcd's project_include.cmake, so it
 # only exists when that straddle is staged. A --no-lcd build skips the
 # rasterizer entirely (there are no LCD icons to ship without the launcher).
