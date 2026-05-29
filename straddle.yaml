@@ -25,17 +25,22 @@ requires:
   - reticulous/maps
   - spangap/spangap-core
   - spangap/spangap-net
+optional_requires:
+  # Default-on; drop with `spangap build --exclude <name>` (or the --no-lcd /
+  # --no-web shorthands). Each call site in main.cpp and each integrating
+  # straddle gates on the corresponding CONFIG_SPANGAP_<NAME> shortcut, so
+  # absence compiles away cleanly.
+  - spangap/spangap-lcd
+  - spangap/spangap-web
   - spangap/wg
   - spangap/upnp
   - spangap/duckdns
   - spangap/acme
+extra_requires:
+  # Default-off; add with `spangap build --include spangap/ota`. OTA halves
+  # the available flash (paired A/B partitions) and is currently lightly
+  # tested, so it's opt-in rather than opt-out for now.
   - spangap/ota
-optional_requires:
-  # Drop with `spangap build --no-lcd` / `--no-web`. Source code in main/ and
-  # in any straddle that integrates with these gates on CONFIG_SPANGAP_LCD /
-  # CONFIG_SPANGAP_WEB, so absence compiles away.
-  - spangap/spangap-lcd
-  - spangap/spangap-web
 buildable:
   name: reticulous
   partition_layout: partitions.csv
