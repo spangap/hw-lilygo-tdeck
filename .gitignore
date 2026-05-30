@@ -46,3 +46,8 @@ esp-idf/sdkconfig.old
 __pycache__/
 *.pyc
 *.pyo
+
+# package-lock.json IS committed for buildable straddles — it pins the full
+# browser dependency tree so the firmware's web build is reproducible for
+# everyone. Library straddles ignore it (see their .gitignore); when a straddle
+# becomes buildable, drop its package-lock ignore and commit the lock.
