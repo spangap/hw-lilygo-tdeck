@@ -36,11 +36,9 @@ optional_requires:
   - spangap/upnp
   - spangap/duckdns
   - spangap/acme
-extra_requires:
-  # Default-off; add with `spangap build --include spangap/ota`. OTA halves
-  # the available flash (paired A/B partitions) and is currently lightly
-  # tested, so it's opt-in rather than opt-out for now.
-  - spangap/ota
+# OTA is not listed here. It halves available flash (paired A/B partitions)
+# and is currently lightly tested, so it's left out of the default and
+# optional sets. Pull it in ad-hoc with `spangap build --include spangap/ota`.
 buildable:
   name: reticulous
   partition_layout: partitions.csv
