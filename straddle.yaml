@@ -4,9 +4,10 @@
 # Owns the T-Deck Plus board HAL (tdeck.cpp/h: power/CS/reset, display/
 # touch/trackball/button HAL, QWERTY keyboard) and the GNSS receiver task
 # (gps.cpp/h — board-specific until a GPS service abstraction earns its
-# own straddle). The partition layout, OTA pubkey, app_main (which drives
-# the explicit per-straddle init() sequence) and the Quasar browser SPA
-# shell all live here.
+# own straddle). The partition layout, OTA pubkey, app_main (which brings up
+# the net foundation, then calls the build-generated spangapInitStraddles()
+# dispatcher to init every staged straddle that declares an `init:` hook) and
+# the Quasar browser SPA shell all live here.
 schema_version: 1
 name: reticulous/reticulous-tdeck
 prefix: tdeck
@@ -22,20 +23,22 @@ requires:
   - reticulous/reticulous-lora
   - reticulous/reticulous-lxmf
   - reticulous/reticulous-nomad
-  - reticulous/maps
   - spangap/spangap-core
   - spangap/spangap-net
 optional_requires:
   # Default-on; drop with `spangap build --exclude <name>` (or the --no-lcd /
-  # --no-web shorthands). Each call site in main.cpp and each integrating
-  # straddle gates on the corresponding CONFIG_SPANGAP_<NAME> shortcut, so
-  # absence compiles away cleanly.
+  # --no-web shorthands). Straddles that declare an `init:` hook (wg, upnp,
+  # duckdns, maps, …) are brought up automatically by the generated
+  # spangapInitStraddles() dispatcher — no call site in main.cpp. The LCD/web
+  # central straddles still gate via CONFIG_SPANGAP_<NAME> shortcuts. Either
+  # way, absence compiles away cleanly.
   - spangap/spangap-lcd
   - spangap/spangap-web
   - spangap/wg
   - spangap/upnp
   - spangap/duckdns
   - spangap/acme
+  - reticulous/maps
 # OTA is not listed here. It halves available flash (paired A/B partitions)
 # and is currently lightly tested, so it's left out of the default and
 # optional sets. Pull it in ad-hoc with `spangap build --include spangap/ota`.
