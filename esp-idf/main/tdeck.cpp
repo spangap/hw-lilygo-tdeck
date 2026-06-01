@@ -597,23 +597,39 @@ uint32_t i2cReadKey() {
  * synthesized over two reads; s_again asks kbDrain for another pass. */
 void readCb(lv_indev_t*, lv_indev_data_t* data) {
     static uint32_t held = 0;
+    dbg("readCb: enter q=%p held=%u\n", (void*)s_queue, (unsigned)held);   /* TEMP probe */
     if (held) { data->key = held; data->state = LV_INDEV_STATE_RELEASED; held = 0; s_again = true; return; }
     uint8_t raw = 0;
     if (s_queue && xQueueReceive(s_queue, &raw, 0) == pdTRUE && raw) {
         s_again = true;
         uint32_t k = mapAsciiKey(raw);
+        dbg("readCb: raw=0x%02x -> key=0x%x focused=%p group=%p\n",   /* TEMP probe */
+            (unsigned)raw, (unsigned)k,
+            (void*)(lcdInputGroup() ? lv_group_get_focused(lcdInputGroup()) : nullptr),
+            (void*)lcdInputGroup());
         if (k) {
             /* Count the keystroke as activity (resets the inactivity blank timer).
              * If it woke the screen, swallow it — the key only served to wake. */
-            if (lcdNotifyActivity()) { data->state = LV_INDEV_STATE_RELEASED; return; }
+            if (lcdNotifyActivity()) { dbg("readCb: swallowed (woke screen)\n"); data->state = LV_INDEV_STATE_RELEASED; return; }
             data->key = k; data->state = LV_INDEV_STATE_PRESSED; held = k; return;
         }
     }
     data->state = LV_INDEV_STATE_RELEASED;
 }
 
+/* lcd task (via lcdRun): create our keypad indev, joined to lcd's focus group. */
+void kbCreateIndev(void*);
+
 /* lcd task (via lcdRun): drain the queue through the indev. */
 void kbDrain(void*) {
+    /* Lazy create. tdeckKeyboardInit() fires lcdRun(kbCreateIndev) right after
+     * spangapInit(), which can land before the lcd task has registered its
+     * LCD_RUN_PORT aux handler — that aux send then fails ("unregistered port")
+     * and the indev is never made, so s_indev stays null and every keypress is
+     * dropped here. kbDrain runs on the lcd task only once it's fully up, so it
+     * is the race-proof place to build the indev on demand (also self-heals if
+     * it were ever deleted). */
+    if (!s_indev) kbCreateIndev(nullptr);
     if (!s_indev) return;
     do { s_again = false; lv_indev_read(s_indev); } while (s_again);
 }
@@ -625,6 +641,8 @@ void kbCreateIndev(void*) {
     lv_indev_set_read_cb(s_indev, readCb);
     lv_indev_set_group(s_indev, lcdInputGroup());
     lv_indev_set_mode(s_indev, LV_INDEV_MODE_EVENT);
+    dbg("kbCreateIndev: s_indev=%p group=%p disp=%p\n",   /* TEMP probe */
+        (void*)s_indev, (void*)lcdInputGroup(), (void*)lv_display_get_default());
 }
 
 void IRAM_ATTR kbIntIsr(void*) {

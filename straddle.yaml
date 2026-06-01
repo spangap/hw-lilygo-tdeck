@@ -25,6 +25,7 @@ requires:
   - reticulous/nomad
   - spangap/spangap-core
   - spangap/spangap-net
+  - spangap/sshd
 optional_requires:
   # Default-on; drop with `spangap build --exclude <name>` (or the --no-lcd /
   # --no-web shorthands). Straddles that declare an `init:` hook (wg, upnp,

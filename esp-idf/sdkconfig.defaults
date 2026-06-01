@@ -64,3 +64,7 @@ CONFIG_LV_FONT_MONTSERRAT_12=y
 # in s.sys.power_on). On power-down main.cpp's hook drives BOARD_POWER_EN_PIN to
 # its inactive level and the device deep-sleeps until the next reset.
 CONFIG_SPANGAP_RESET_ON_OFF=y
+
+# IPv6 SLAAC: form a global address from router RAs so the device can reach
+# v6-only hosts (e.g. play.rop.nl off-VPN). Dial path is AF_UNSPEC.
+CONFIG_LWIP_IPV6_AUTOCONFIG=y
