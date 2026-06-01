@@ -454,6 +454,21 @@ static bool tdeckPointerRead(int* x, int* y) {
     int dxp = c[TB_RIGHT] - c[TB_LEFT];     /* signed pulse delta this read */
     int dyp = c[TB_DOWN]  - c[TB_UP];
 
+    /* Arrow-key mode (a program claimed it via lcdProgramScrollwheelArrows, e.g.
+     * the on-device terminal): feed arrows to the focus group instead of moving
+     * the pointer. Uses the raw per-read pulse delta, so it never sticks at a
+     * screen edge the way the clamped pointer position would. */
+    if (lcdScrollwheelArrowsActive()) {
+        int n; uint32_t key;
+        if (abs(dyp) >= abs(dxp)) { n = abs(dyp); key = dyp > 0 ? LV_KEY_DOWN  : LV_KEY_UP;   }
+        else                      { n = abs(dxp); key = dxp > 0 ? LV_KEY_RIGHT : LV_KEY_LEFT; }
+        if (n > 4) n = 4;                   /* cap a fast flick */
+        lv_group_t* g = lcdInputGroup();
+        for (int i = 0; i < n && g; i++) lv_group_send_data(g, key);
+        *x = s_ptrX; *y = s_ptrY;           /* pointer stays put */
+        return false;
+    }
+
     /* Pointer acceleration. Smooth the pulse rate with a *time-decayed* EMA: a
      * short gap barely moves it (steady feel under a continuous roll), a long gap
      * decays it toward zero (so the first nudge after a pause is precise, not a
@@ -597,20 +612,30 @@ uint32_t i2cReadKey() {
  * synthesized over two reads; s_again asks kbDrain for another pass. */
 void readCb(lv_indev_t*, lv_indev_data_t* data) {
     static uint32_t held = 0;
-    dbg("readCb: enter q=%p held=%u\n", (void*)s_queue, (unsigned)held);   /* TEMP probe */
+    /* Control prefix: the keyboard sends 0x0C for Alt-C; treat it as a one-shot
+     * "next lowercase letter is Ctrl-<letter>" lead-in (within 1 s), encoded
+     * with LCD_KEY_CTRL for the terminal to turn into a control byte. */
+    static TickType_t ctrlUntil = 0;
     if (held) { data->key = held; data->state = LV_INDEV_STATE_RELEASED; held = 0; s_again = true; return; }
     uint8_t raw = 0;
     if (s_queue && xQueueReceive(s_queue, &raw, 0) == pdTRUE && raw) {
         s_again = true;
-        uint32_t k = mapAsciiKey(raw);
-        dbg("readCb: raw=0x%02x -> key=0x%x focused=%p group=%p\n",   /* TEMP probe */
-            (unsigned)raw, (unsigned)k,
-            (void*)(lcdInputGroup() ? lv_group_get_focused(lcdInputGroup()) : nullptr),
-            (void*)lcdInputGroup());
+        uint32_t k;
+        if (raw == 0x0C) {                          /* prefix — swallow, arm for 1 s */
+            ctrlUntil = xTaskGetTickCount() + pdMS_TO_TICKS(1000);
+            k = 0;
+        } else if (ctrlUntil && (long)(ctrlUntil - xTaskGetTickCount()) > 0
+                   && raw >= 'a' && raw <= 'z') {
+            ctrlUntil = 0;
+            k = LCD_KEY_CTRL | raw;                 /* Ctrl-<letter> */
+        } else {
+            ctrlUntil = 0;
+            k = mapAsciiKey(raw);
+        }
         if (k) {
             /* Count the keystroke as activity (resets the inactivity blank timer).
              * If it woke the screen, swallow it — the key only served to wake. */
-            if (lcdNotifyActivity()) { dbg("readCb: swallowed (woke screen)\n"); data->state = LV_INDEV_STATE_RELEASED; return; }
+            if (lcdNotifyActivity()) { data->state = LV_INDEV_STATE_RELEASED; return; }
             data->key = k; data->state = LV_INDEV_STATE_PRESSED; held = k; return;
         }
     }
