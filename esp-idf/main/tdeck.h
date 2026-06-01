@@ -21,6 +21,7 @@
 #pragma once
 
 #include "driver/spi_common.h"
+#include "driver/i2c_master.h"
 #include "sdkconfig.h"
 
 #if defined(CONFIG_RETICULOUS_BOARD_TDECK_PLUS)
@@ -53,7 +54,7 @@
     #define BOARD_LCD_BL_PIN        42      /* backlight (LEDC PWM) */
     #define BOARD_LCD_H_RES         320     /* landscape (after swap_xy) */
     #define BOARD_LCD_V_RES         240
-    #define BOARD_LCD_PCLK_HZ       (40 * 1000 * 1000)
+    #define BOARD_LCD_PCLK_HZ       (40 * 1000 * 1000)   /* SCK/MOSI (40/41) are NOT SPI2 IOMUX pins → bus goes via GPIO matrix, which caps the S3 SPI clock ~40M. Requesting more just clamps. */
 
     /* GT911 capacitive touch (optional sub-revision). Shares the on-board
      * I2C bus (keyboard is 0x55, touch 0x5D). No reset GPIO routed. */
@@ -124,3 +125,13 @@
  */
 void tdeckPreInit(void);
 void tdeckPostInit(void);
+
+/**
+ * Shared I2C0 master bus (SDA=BOARD_TOUCH_I2C_SDA, SCL=BOARD_TOUCH_I2C_SCL).
+ * Created lazily on first call; the first caller wins and all later callers get
+ * the same handle. Home to the GT911 touch (0x5D) and QWERTY keyboard (0x55)
+ * when the lcd component is built, and the PCF8563 RTC (0x51) regardless — so
+ * this accessor is always compiled, not gated on CONFIG_SPANGAP_LCD. Returns
+ * nullptr if the bus could not be created. Thread-safe at the IDF driver layer.
+ */
+i2c_master_bus_handle_t tdeckI2cBus(void);

@@ -29,9 +29,23 @@
  * the UART non-blocking, fold every sentence into a working fix, and once
  * s.gps.interval seconds have elapsed publish the whole snapshot to gps.*.
  *
- * A fresh fix (valid date+time) disciplines the system clock — publishing the
- * same sys.time.valid flag ntp uses, so a GPS-only device with no network still
- * gets a wall clock — unless s.gps.ignore_clock is set.
+ * Time discipline (unless s.gps.ignore_clock is set — then the clock is left
+ * entirely to ntp / manual set):
+ *   - GPS: while the system clock is invalid (pre-2025) we accept *any* valid
+ *     GPS date+time — no satellites/position required (the receiver streams time
+ *     before it locks). Once valid we only re-discipline from a real positioned
+ *     fix. Either way we parse the NMEA sub-second field and subtract a static
+ *     per-model pipeline lag (no PPS on the Plus to measure it), write the
+ *     corrected time to the system clock, and publish sys.time.valid. Receiving
+ *     GPS time inhibits ntp; we hand control back to ntp if the clock goes
+ *     invalid or no valid GPS time is seen for a while — 3 days with an RTC to
+ *     hold time, but only 1 hour without one (the RC-oscillator clock drifts).
+ *   - RTC (PCF8563): the *stock* T-Deck has none — its I2C0 bus is keyboard +
+ *     touch only — so this is all auto-detected and dormant by default. If a
+ *     PCF8563 is found at 0x51 (external on the Grove I2C, or a board rev that
+ *     adds one) we adopt its time at boot, mirror every GPS set to it, and once
+ *     a minute with no GPS coverage re-sync the system clock from it (logging
+ *     the drift at debug) so the wall clock survives long fixless runs.
  *
  * Config:    s.gps.enable (0/1), s.gps.interval (seconds), s.gps.ignore_clock (0/1)
  * Ephemeral: gps.model gps.baud gps.state gps.fix gps.quality gps.lat gps.lon
@@ -40,6 +54,8 @@
  */
 #include "gps.h"
 #include "tdeck.h"
+#include "rtc.h"
+#include "ntp.h"
 #include "spangap.h"
 
 #include "driver/uart.h"
@@ -65,6 +81,29 @@ static constexpr uart_port_t GPS_UART = static_cast<uart_port_t>(BOARD_GPS_UART_
 
 #define GPS_VERSION 1
 
+/* ─────────────── clock-discipline tunables ─────────────── */
+
+static constexpr time_t  kValidEpoch  = 1735689600;          /* 2025-01-01 00:00 UTC: below = bogus */
+static constexpr int64_t kStepThreshUs = 250000;             /* don't re-step the system clock for < this (serial jitter floor) */
+static constexpr int64_t kHeartbeatUs  = 60ll  * 1000000;    /* RTC sync / ntp-staleness cadence */
+static constexpr int64_t kCoverageUs   = 90ll  * 1000000;    /* "GPS time seen recently" window */
+/* No GPS time for this long → hand the clock back to ntp. With an RTC the clock
+ * is held on its crystal, so tolerate long GPS gaps; without one the clock rides
+ * the ESP32 RC oscillator (huge drift, esp. across sleep), so reclaim it fast. */
+static constexpr int64_t kNtpStaleRtcUs   = 3ll * 24 * 3600 * 1000000;  /* 3 days */
+static constexpr int64_t kNtpStaleNoRtcUs = 3600ll * 1000000;           /* 1 hour */
+
+/* Static best-guess for the lag from the GPS fix instant to the moment the
+ * time-bearing NMEA sentence is fully in our hands: receiver solution + serial
+ * drain + buffer dwell. No PPS on the T-Deck Plus, so this can't be measured —
+ * these are per-model estimates (richer/faster u-blox vs slower 9600 L76K).
+ * gpsDisciplineFromGps() adds the measured time-since-parse on top. */
+static int64_t gpsPipelineLagUs(int baud) {
+    if (baud == 38400) return 70000;    /* u-blox MIA-M10Q @ 38400 ≈ 70 ms */
+    if (baud == 9600)  return 260000;   /* Quectel L76K     @ 9600  ≈ 260 ms */
+    return 150000;
+}
+
 /* Baud candidates, richest receiver first; the first that yields a valid NMEA
  * sentence wins and identifies the chip (docs/tdeck.md §1.3). */
 static constexpr int  kBauds[]      = { 38400, 9600 };
@@ -88,8 +127,10 @@ struct GpsFix {
     double  hdop = 0, vdop = 0, pdop = 0;
     int     snrMax     = 0;      /* best C/N0 this epoch (reset in drainUart) */
     int     yr = 0, mo = 0, dy = 0, hh = 0, mi = 0, se = 0;
+    int     ms = 0;              /* RMC sub-second field (0-999), 0 if absent */
     bool    hasTime = false, hasDate = false;
-    int64_t lastFixUs = 0;       /* esp_timer at last valid fix, 0 = never */
+    int64_t lastFixUs  = 0;      /* esp_timer at last valid (positioned) fix, 0 = never */
+    int64_t timeRxUs   = 0;      /* esp_timer when the time field was parsed (for lag accounting) */
 };
 
 /* ─────────────── globals (single-task ownership) ─────────────── */
@@ -106,7 +147,13 @@ static bool          s_needsPowerCycle = false;  /* L76K put in FORCE-pin-only b
 static GpsFix        s_fix;
 static std::string   s_line;               /* incremental NMEA line assembly */
 static int64_t       s_lastPublishUs = 0;
-static bool          s_clockSet = false;   /* system clock disciplined from the current fix session */
+
+/* clock discipline (all touched only on the gps task) */
+static bool          s_ignoreClock = false;     /* s.gps.ignore_clock: leave the clock to ntp/manual */
+static int           s_rtcPresent  = -1;        /* -1 unknown, 0 absent, 1 present (probed once at boot) */
+static int64_t       s_lastGpsDisciplineUs = 0; /* esp_timer when GPS last drove the clock, 0 = never */
+static int64_t       s_lastHeartbeatUs = 0;     /* esp_timer of last gpsHeartbeat() */
+static bool          s_ntpInhibited = false;    /* mirror of what we last told ntp (avoid redundant calls) */
 
 /* ─────────────── NMEA helpers ─────────────── */
 
@@ -172,7 +219,19 @@ static bool nmeaApply(std::string_view line, GpsFix& fix) {
         // hhmmss(.sss)
         if (f[1].size() >= 6) {
             fix.hh = toI(f[1].substr(0, 2)); fix.mi = toI(f[1].substr(2, 2));
-            fix.se = toI(f[1].substr(4, 2)); fix.hasTime = true;
+            fix.se = toI(f[1].substr(4, 2));
+            /* sub-second fraction → ms: ".5"=500, ".05"=50, ".250"=250 */
+            fix.ms = 0;
+            if (f[1].size() > 7 && f[1][6] == '.') {
+                std::string_view frac = f[1].substr(7);
+                int scale = 100;
+                for (size_t i = 0; i < frac.size() && scale > 0; i++) {
+                    if (frac[i] < '0' || frac[i] > '9') break;
+                    fix.ms += (frac[i] - '0') * scale; scale /= 10;
+                }
+            }
+            fix.hasTime  = true;
+            fix.timeRxUs = esp_timer_get_time();   /* anchor for lag accounting */
         }
         if (fix.valid) {
             fix.lat = toDegrees(f[3], f[4]);
@@ -369,10 +428,44 @@ static time_t utcToEpoch(const struct tm& t) {
     return (time_t)(days * 86400 + t.tm_hour * 3600 + t.tm_min * 60 + t.tm_sec);
 }
 
-/* Set the system clock from the current fix's UTC date+time. Publishes the same
- * sys.time.valid flag ntp uses, so the status-bar clock lights up on a GPS-only
- * device with no network. */
-static void gpsSetClock(void) {
+/* Log a clock correction at a level scaled to its magnitude (the brief's tiers):
+ *   < 100 ms verbose · 100 ms–5 s debug · 5–60 s info · > 60 s warn. */
+static void logTimeUpdate(const char* src, int64_t deltaUs) {
+    int64_t a  = deltaUs < 0 ? -deltaUs : deltaUs;
+    long    ms = (long)(deltaUs / 1000);
+    double  s  = deltaUs / 1e6;
+    if      (a < 100000)   verb("%s time update %+ld ms",  src, ms);
+    else if (a < 5000000)  dbg ("%s time update %+ld ms",  src, ms);
+    else if (a < 60000000) info("%s time update %+.1f s",  src, s);
+    else                   warn("%s time update %+.1f s",  src, s);
+}
+
+/* Hand the clock to ntp, or take it away. We own the clock (inhibit ntp) only
+ * while it is valid AND we have seen GPS time within the staleness window;
+ * otherwise — clock invalid, gone stale, or the user pinned us off — ntp gets
+ * it back. Mirrors the last decision so we only call ntpInhibit on a change. */
+static void ntpReconcile(void) {
+    bool desired;
+    if (s_ignoreClock) {
+        desired = false;
+    } else {
+        bool    valid = time(nullptr) >= kValidEpoch;
+        int64_t age   = esp_timer_get_time() - s_lastGpsDisciplineUs;
+        /* Treat unknown (-1, e.g. clock pinned off) as no-RTC: the cautious 1 h. */
+        int64_t stale = (s_rtcPresent == 1) ? kNtpStaleRtcUs : kNtpStaleNoRtcUs;
+        bool    fresh = s_lastGpsDisciplineUs != 0 && age <= stale;
+        desired = valid && fresh;
+    }
+    if (desired != s_ntpInhibited) {
+        ntpInhibit(desired);
+        s_ntpInhibited = desired;
+        dbg("ntp %s", desired ? "inhibited (GPS time)" : "released");
+    }
+}
+
+/* Discipline the system clock (and mirror to the RTC) from the current fix's
+ * UTC date+time. Caller has already decided the fix qualifies. */
+static void gpsDisciplineFromGps(void) {
     struct tm tmv = {};
     tmv.tm_year = s_fix.yr - 1900;
     tmv.tm_mon  = s_fix.mo - 1;
@@ -381,23 +474,109 @@ static void gpsSetClock(void) {
     tmv.tm_min  = s_fix.mi;
     tmv.tm_sec  = s_fix.se;
     time_t epoch = utcToEpoch(tmv);              /* fix time is UTC */
-    if (epoch < 1735689600) return;              /* before 2025-01-01 = bogus, ignore */
-    /* Skip if we're already within 2 s — settimeofday is a step, not a slew,
-     * so a small correction would make the wall clock jump non-monotonically
-     * (and we'd just be re-jamming whole-second NMEA precision on top of a
-     * clock that's already as good as we can do). Still publish sys.time.valid
-     * so downstream consumers know the time is trusted. */
-    time_t nowSec = time(nullptr);
-    time_t delta = epoch - nowSec; if (delta < 0) delta = -delta;
-    if (delta < 2) {
-        storageSet("sys.time.valid", 1);
+    if (epoch < kValidEpoch) return;             /* before 2025-01-01 = bogus, ignore */
+
+    /* fix instant + receiver's own sub-second + static pipeline lag + however
+     * long since we parsed the sentence = true UTC now. */
+    int64_t gpsUs = (int64_t)epoch * 1000000 + (int64_t)s_fix.ms * 1000
+                  + gpsPipelineLagUs(s_baud)
+                  + (esp_timer_get_time() - s_fix.timeRxUs);
+
+    struct timeval nowTv; gettimeofday(&nowTv, nullptr);
+    int64_t nowUs = (int64_t)nowTv.tv_sec * 1000000 + nowTv.tv_usec;
+    int64_t delta = gpsUs - nowUs;               /* +ve: system is behind GPS */
+    bool    sysInvalid = nowUs < (int64_t)kValidEpoch * 1000000;
+
+    logTimeUpdate("GPS", delta);
+
+    /* Step only when worthwhile — settimeofday is a jump, and with no PPS the
+     * sub-250 ms residual is serial jitter not worth chasing. Always step a
+     * still-invalid clock. */
+    if (sysInvalid || (delta < 0 ? -delta : delta) >= kStepThreshUs) {
+        struct timeval tv = { .tv_sec  = (time_t)(gpsUs / 1000000),
+                              .tv_usec = (suseconds_t)(gpsUs % 1000000) };
+        settimeofday(&tv, nullptr);
+        /* Mirror to the RTC (if one is actually present) so the clock can survive
+         * a power cycle / GPS outage. Stock T-Deck has none — skip silently. */
+        if (s_rtcPresent == 1) {
+            struct tm utc; time_t s = tv.tv_sec; gmtime_r(&s, &utc);
+            if (rtcWrite(&utc)) dbg("clock mirrored to RTC");
+            else                warn("RTC write failed (no PCF8563 ACK at 0x51?)");
+        }
+    }
+    storageSet("sys.time.valid", 1);
+
+    s_lastGpsDisciplineUs = esp_timer_get_time();
+    ntpReconcile();
+}
+
+/* Boot: adopt the RTC's time if it's trustworthy and the system clock is unset,
+ * so the wall clock is live before the first fix. Whole-second only. */
+static void rtcBootSync(void) {
+    /* Probe once and remember. The stock T-Deck (incl. Plus) has NO RTC — its
+     * I2C0 bus carries only the keyboard (0x55) and touch (0x5D). So absence is
+     * the normal case: note it once at info and then never touch I2C for the RTC
+     * again (no per-minute probes, no per-fix write attempts). The driver stays
+     * wired up so an external PCF8563 on the Grove I2C header — or a board rev
+     * that adds one — is picked up here and used automatically. */
+    s_rtcPresent = rtcProbe() ? 1 : 0;
+    if (!s_rtcPresent) {
+        info("no PCF8563 at 0x51 — T-Deck has no RTC; GPS/NTP only");
         return;
     }
+    info("PCF8563 present at 0x51");
+    struct tm t; bool clockValid = false;
+    if (!rtcRead(&t, &clockValid)) { warn("RTC present but read failed"); return; }
+    time_t epoch = utcToEpoch(t);
+    if (!clockValid) {
+        warn("RTC present but VL set — lost power since last write (no backup cell?)");
+        return;
+    }
+    if (epoch < kValidEpoch) {
+        info("RTC time pre-2025 (%04d) — ignoring", t.tm_year + 1900);
+        return;
+    }
+    if (time(nullptr) >= kValidEpoch) return;    /* something already set the clock */
     struct timeval tv = { .tv_sec = epoch, .tv_usec = 0 };
     settimeofday(&tv, nullptr);
     storageSet("sys.time.valid", 1);
-    info("clock set from GPS: %04d-%02d-%02d %02d:%02d:%02d UTC (was off by %lds)",
-         s_fix.yr, s_fix.mo, s_fix.dy, s_fix.hh, s_fix.mi, s_fix.se, (long)delta);
+    info("clock set from RTC at boot: %04d-%02d-%02d %02d:%02d:%02d UTC",
+         t.tm_year + 1900, t.tm_mon + 1, t.tm_mday, t.tm_hour, t.tm_min, t.tm_sec);
+}
+
+/* Once a minute: with no recent GPS time, keep the system clock pinned to the
+ * RTC (the brief's fallback keeper) and log the drift between them at debug.
+ * Also reconciles ntp ownership as the GPS-staleness window expires. */
+static void gpsHeartbeat(void) {
+    if (s_ignoreClock) { ntpReconcile(); return; }
+
+    int64_t now = esp_timer_get_time();
+    bool gpsCoverage = s_lastGpsDisciplineUs != 0 &&
+                       (now - s_lastGpsDisciplineUs) <= kCoverageUs;
+    /* RTC keeper only makes sense when a chip is actually present (s_rtcPresent
+     * is set by rtcBootSync before the first heartbeat). Stock T-Deck: no RTC,
+     * so the fallback keeper is ntp via the staleness reconcile below. */
+    if (!gpsCoverage && s_rtcPresent == 1) {
+        struct tm t; bool clockValid = false;
+        if (rtcRead(&t, &clockValid) && clockValid) {
+            time_t epoch = utcToEpoch(t);
+            if (epoch >= kValidEpoch) {
+                struct timeval nowTv; gettimeofday(&nowTv, nullptr);
+                int64_t nowUs = (int64_t)nowTv.tv_sec * 1000000 + nowTv.tv_usec;
+                int64_t delta = (int64_t)epoch * 1000000 - nowUs;
+                dbg("RTC sync: system %+ld ms vs RTC", (long)(delta / 1000));
+                /* RTC is whole-second; only step for ≥1 s drift (or an unset
+                 * clock) so sub-second quantization isn't mistaken for drift. */
+                if (nowUs < (int64_t)kValidEpoch * 1000000 ||
+                    (delta < 0 ? -delta : delta) >= 1000000) {
+                    struct timeval tv = { .tv_sec = epoch, .tv_usec = 0 };
+                    settimeofday(&tv, nullptr);
+                    storageSet("sys.time.valid", 1);
+                }
+            }
+        }
+    }
+    ntpReconcile();
 }
 
 static void publishFix(void) {
@@ -445,15 +624,15 @@ static void publishFix(void) {
     }
     storageEnd();
 
-    /* Discipline the system clock from a fresh fix — once per acquisition, and
-     * only if the user hasn't pinned it off via s.gps.ignore_clock. */
-    if (haveFix && s_fix.hasDate && s_fix.hasTime) {
-        if (!s_clockSet && !storageGetInt("s.gps.ignore_clock", 0)) {
-            gpsSetClock();
-            s_clockSet = true;
-        }
-    } else {
-        s_clockSet = false;   /* fix lost → re-discipline on the next acquisition */
+    /* Discipline the system clock from GPS, unless pinned off. While the clock
+     * is invalid we take any valid date+time (no sats/position needed — the
+     * receiver streams time before it locks); once valid we trust only a real
+     * positioned fix. The step threshold in gpsDisciplineFromGps() keeps this
+     * from churning when re-run every publish. */
+    if (!s_ignoreClock && s_fix.hasDate && s_fix.hasTime) {
+        bool sysInvalid = time(nullptr) < kValidEpoch;
+        if (sysInvalid || haveFix)
+            gpsDisciplineFromGps();
     }
 }
 
@@ -468,9 +647,10 @@ static void publishModel(const char* state, const char* model, int baud) {
 /* ─────────────── config ─────────────── */
 
 static void applyConfig(void) {
-    s_enabled  = storageGetInt("s.gps.enable", 0) != 0;
-    s_interval = storageGetInt("s.gps.interval", 1);
+    s_enabled     = storageGetInt("s.gps.enable", 0) != 0;
+    s_interval    = storageGetInt("s.gps.interval", 1);
     if (s_interval < 1) s_interval = 1;
+    s_ignoreClock = storageGetInt("s.gps.ignore_clock", 0) != 0;
 
     if (!s_enabled) {
         if (s_running) {
@@ -580,6 +760,11 @@ static void gpsTaskMain(void*) {
     itsClientInit(2);
     storageSubscribeChanges("s.gps", onCfgChange);
 
+    /* Bring the wall clock up from the RTC before anything else. Read the gate
+     * directly — applyConfig() hasn't run yet. */
+    s_ignoreClock = storageGetInt("s.gps.ignore_clock", 0) != 0;
+    if (!s_ignoreClock) rtcBootSync();
+
     for (;;) {
         if (s_cfgDirty) { s_cfgDirty = false; applyConfig(); }
 
@@ -593,18 +778,28 @@ static void gpsTaskMain(void*) {
             }
         }
 
+        /* Heartbeat (RTC keeper + ntp-staleness reconcile) runs on its own ≤60 s
+         * cadence regardless of whether the receiver is up — the clock must stay
+         * alive even with GPS disabled or undetected. */
+        int64_t now = esp_timer_get_time();
+        if (s_lastHeartbeatUs == 0 || now - s_lastHeartbeatUs >= kHeartbeatUs) {
+            gpsHeartbeat();
+            s_lastHeartbeatUs = now;
+        }
+
         /* Single wait point. Running: wake ≤1 s to drain the 1 Hz stream and to
-         * hit the next publish deadline (no IRQ/PPS wired). Idle: block until a
-         * config change notifies us. */
-        TickType_t wait = portMAX_DELAY;
+         * hit the next publish deadline (no IRQ/PPS wired). Otherwise block until
+         * a config change — but never longer than the next heartbeat is due. */
+        int waitMs = (int)((kHeartbeatUs - (esp_timer_get_time() - s_lastHeartbeatUs)) / 1000);
+        if (waitMs < 0) waitMs = 0;
         if (s_running) {
             int64_t toPub = (int64_t)s_interval * 1000000 -
                             (esp_timer_get_time() - s_lastPublishUs);
-            int ms = (toPub <= 0) ? 0 : (int)(toPub / 1000);
-            if (ms > 1000) ms = 1000;
-            wait = pdMS_TO_TICKS(ms);
+            int pubMs = (toPub <= 0) ? 0 : (int)(toPub / 1000);
+            if (pubMs > 1000) pubMs = 1000;
+            if (pubMs < waitMs) waitMs = pubMs;
         }
-        itsPoll(wait);
+        itsPoll(pdMS_TO_TICKS(waitMs));
     }
 }
 

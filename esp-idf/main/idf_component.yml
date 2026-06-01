@@ -3,8 +3,8 @@ dependencies:
     version: ">=5.5"
 
   # Platform straddles (spangap-core/-net/-web/-lcd, wg, upnp, duckdns, acme,
-  # ota) and reticulous feature straddles (reticulous-core, reticulous-tcp/
-  # -auto/-espnow/-lora, reticulous-lxmf, reticulous-nomad, maps) are NOT
+  # ota) and reticulous feature straddles (rns, tr-tcp/
+  # -auto/-espnow/-lora, lxmf, nomad, maps) are NOT
   # listed here. They're declared in straddle.yaml's `requires:` and staged
   # at build time by `spangap make` into staging/components/<short>/, picked
   # up via EXTRA_COMPONENT_DIRS. Listing them here too would double-stage
@@ -14,7 +14,7 @@ dependencies:
   # The component manager doesn't recurse into locally-staged components'
   # dependencies, so the buildable straddle has to surface every third-party
   # managed dep that any of its required straddles transitively uses
-  # (radiolib for reticulous-lora, esp_jpeg for reticulous/maps). LVGL is
+  # (radiolib for tr-lora, esp_jpeg for reticulous/maps). LVGL is
   # the exception — it's a registry component, not a straddle, so it's
   # pinned in spangap-lcd's own idf_component.yml and reaches us through
   # the normal managed-component recursion.

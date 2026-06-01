@@ -9,7 +9,7 @@ if(EXISTS "${CMAKE_SOURCE_DIR}/staging/components")
     list(APPEND EXTRA_COMPONENT_DIRS "${CMAKE_SOURCE_DIR}/staging/components")
     # A straddle is one ESP-IDF component, but it may bundle vendored sub-
     # components in its own `esp-idf/components/<x>/` subdir. The canonical
-    # case is reticulous-core which vendors the µReticulum hard fork +
+    # case is rns which vendors the µReticulum hard fork +
     # bzip2 as sub-components. EXTRA_COMPONENT_DIRS doesn't recurse, so
     # add each present `staging/components/<straddle>/components/` to the
     # search path explicitly.

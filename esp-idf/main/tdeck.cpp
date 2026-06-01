@@ -14,8 +14,10 @@
  */
 #include "tdeck.h"
 #include "pm.h"             /* resetOnOffSetPowerOff */
+#include "log.h"            /* warn (i2c bus init) */
 
 #include "driver/gpio.h"
+#include "driver/i2c_master.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -94,6 +96,32 @@ static void tdeckPeripheralPowerOff(void)
 #endif
 
 /* =========================================================================
+ * 1b. Shared I2C0 master bus
+ *
+ * Always compiled (not LCD-gated): the GT911 touch and QWERTY keyboard live
+ * here only with CONFIG_SPANGAP_LCD, but the PCF8563 RTC (gps.cpp, 0x51) shares
+ * the same bus on a headless build too. Created once; first caller wins.
+ * ========================================================================= */
+
+static i2c_master_bus_handle_t s_i2c = nullptr;   /* shared I2C0: touch + keyboard + RTC */
+
+i2c_master_bus_handle_t tdeckI2cBus(void) {
+    if (s_i2c) return s_i2c;
+    i2c_master_bus_config_t bcfg = {};
+    bcfg.i2c_port                     = I2C_NUM_0;
+    bcfg.sda_io_num                   = (gpio_num_t)BOARD_TOUCH_I2C_SDA;
+    bcfg.scl_io_num                   = (gpio_num_t)BOARD_TOUCH_I2C_SCL;
+    bcfg.clk_source                   = I2C_CLK_SRC_DEFAULT;
+    bcfg.glitch_ignore_cnt            = 7;
+    bcfg.flags.enable_internal_pullup = true;
+    if (i2c_new_master_bus(&bcfg, &s_i2c) != ESP_OK) {
+        warn("i2c: bus init failed\n");
+        s_i2c = nullptr;
+    }
+    return s_i2c;
+}
+
+/* =========================================================================
  * 2. + 3. On-device UI: ST7789V display, GT911 touch, trackball pointer,
  *    centre/Home button (the lcd component's board HAL), and the QWERTY
  *    keyboard. Only compiled when the lcd module is enabled.
@@ -129,7 +157,6 @@ static void tdeckPeripheralPowerOff(void)
 #define BL_CH     LEDC_CHANNEL_0
 
 static esp_lcd_panel_handle_t  s_panel = nullptr;
-static i2c_master_bus_handle_t s_i2c   = nullptr;   /* shared I2C0: touch + keyboard */
 
 /* Forward declarations so the HAL ops table + cross-calls resolve regardless
  * of definition order. */
@@ -142,7 +169,6 @@ static void                    tdeckButtonInit(void);
 static bool                    tdeckButtonRead(void);
 static void                    tdeckTrackballInit(void);
 static bool                    tdeckPointerRead(int* x, int* y);
-static i2c_master_bus_handle_t tdeckI2cBus(void);   /* shared by touch + keyboard */
 
 static void backlightInit(void) {
     ledc_timer_config_t t = {};
@@ -260,24 +286,6 @@ static void tdeckLcdBacklight(uint8_t level) {
     uint32_t duty = (level == 255) ? (1u << 8) : level;   /* 8-bit: 256 = true 100% */
     ledc_set_duty(BL_MODE, BL_CH, duty);
     ledc_update_duty(BL_MODE, BL_CH);
-}
-
-/* Shared I2C0 master bus — both the GT911 touch and the keyboard MCU live here.
- * Created once; first caller (touch init or the keyboard bring-up) wins. */
-static i2c_master_bus_handle_t tdeckI2cBus(void) {
-    if (s_i2c) return s_i2c;
-    i2c_master_bus_config_t bcfg = {};
-    bcfg.i2c_port                     = I2C_NUM_0;
-    bcfg.sda_io_num                   = (gpio_num_t)BOARD_TOUCH_I2C_SDA;
-    bcfg.scl_io_num                   = (gpio_num_t)BOARD_TOUCH_I2C_SCL;
-    bcfg.clk_source                   = I2C_CLK_SRC_DEFAULT;
-    bcfg.glitch_ignore_cnt            = 7;
-    bcfg.flags.enable_internal_pullup = true;
-    if (i2c_new_master_bus(&bcfg, &s_i2c) != ESP_OK) {
-        warn("i2c: bus init failed\n");
-        s_i2c = nullptr;
-    }
-    return s_i2c;
 }
 
 static esp_lcd_touch_handle_t tdeckTouchInit(void) {
@@ -691,6 +699,10 @@ static void tdeckKeyboardInit(void) {
 
 void tdeckPreInit(void) {
     tdeckPowerInit();                       /* power rail + shared-SPI CS park */
+    /* Create the shared I2C0 bus now, while we're still single-threaded — touch
+     * (lcd task), keyboard (kbpoll task) and the RTC (gps task) all bring it up
+     * lazily and could otherwise race i2c_new_master_bus() on the same port. */
+    tdeckI2cBus();
 #if BOARD_POWER_EN_PIN >= 0
     resetOnOffSetPowerOff(tdeckPeripheralPowerOff);
 #endif

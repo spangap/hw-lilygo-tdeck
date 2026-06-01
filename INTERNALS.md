@@ -1,4 +1,4 @@
-# reticulous-tdeck — internals
+# hw-tdeck — internals
 
 App-side developer reference. The protocol-level deep dives (rnsd,
 lxmf, transports) belong to their own straddles; this file is for
@@ -48,7 +48,7 @@ All T-Deck Plus board support lives here:
 - The two-phase API:
   `void tdeckPreInit(void);` and `void tdeckPostInit(void);`.
 
-The `BOARD_*` pin map is also consumed by `reticulous-lora` (via its
+The `BOARD_*` pin map is also consumed by `tr-lora` (via its
 PRIVATE include path that picks up `${CMAKE_SOURCE_DIR}/main`) and by
 `main.cpp` itself.
 
@@ -139,18 +139,18 @@ The protocol-level deep dives now live in their owning straddles —
 the index that used to be in CLAUDE.md is:
 
 - **rnsd** — [docs/rnsd.md](docs/rnsd.md) (this app) +
-  [reticulous-core](../reticulous-core).
+  [rns](../rns).
 - **tcp** — [docs/tcp.md](docs/tcp.md) +
-  [reticulous-tcp](../reticulous-tcp).
+  [tr-tcp](../tr-tcp).
 - **auto** — [docs/auto.md](docs/auto.md) +
-  [reticulous-auto](../reticulous-auto).
+  [tr-auto](../tr-auto).
 - **lora** — [docs/lora.md](docs/lora.md) +
-  [reticulous-lora](../reticulous-lora).
+  [tr-lora](../tr-lora).
 - **lxmf** — [docs/lxmf.md](docs/lxmf.md) (black box),
   [docs/internals/lxmf.md](docs/internals/lxmf.md) (reach inside) +
-  [reticulous-lxmf](../reticulous-lxmf).
+  [lxmf](../lxmf).
 - **nomad** — [docs/nomad.md](docs/nomad.md) +
-  [reticulous-nomad](../reticulous-nomad).
+  [nomad](../nomad).
 - **gps** — [docs/gps.md](docs/gps.md) (lives here because GNSS is
   board-specific).
 - **maps** — [docs/maps.md](docs/maps.md) + [maps](../maps).

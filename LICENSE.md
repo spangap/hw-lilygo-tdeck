@@ -1,6 +1,6 @@
 # License
 
-This repository, **reticulous-tdeck** (the consumer "buildable straddle" that
+This repository, **hw-tdeck** (the consumer "buildable straddle" that
 bundles spangap + reticulous straddles into a flashable T-Deck S3 firmware
 image and a browser SPA), is released under the **Apache License,
 Version 2.0**.
@@ -29,9 +29,9 @@ vendored third-party sub-components with their own licenses:
 | `spangap/spangap-net`, `spangap-lcd`, `spangap-web` | none | — |
 | `spangap/wg` | trombik/esp_wireguard tree, NaCl curve25519 ref, poly1305-donna, x25519 by Cryptography Research, RFC 7693 blake2s | BSD-3-Clause / public domain / MIT |
 | `spangap/acme`, `duckdns`, `ota`, `upnp` | none | — |
-| `reticulous/reticulous-core` | microReticulum fork, microStore, ed25519-donna, x25519 (Mike Hamburg), bzip2 | Apache-2.0 / public domain / MIT / bzip2 license |
-| `reticulous/reticulous-tcp`, `-auto`, `-espnow`, `-lxmf`, `-nomad`, `maps` | none | — |
-| `reticulous/reticulous-lora` | RadioLib (pulled as managed dep, not vendored) | MIT |
+| `reticulous/rns` | microReticulum fork, microStore, ed25519-donna, x25519 (Mike Hamburg), bzip2 | Apache-2.0 / public domain / MIT / bzip2 license |
+| `reticulous/tr-tcp`, `-auto`, `-espnow`, `-lxmf`, `-nomad`, `maps` | none | — |
+| `reticulous/tr-lora` | RadioLib (pulled as managed dep, not vendored) | MIT |
 
 ### Firmware build-time dependencies
 
@@ -42,7 +42,7 @@ third-party managed dep used by any of the straddles it requires:
 | Component | Source | License |
 |---|---|---|
 | ESP-IDF v5.5.4 (platform) | espressif/esp-idf | Apache-2.0 |
-| `jgromes/radiolib` v7 (for reticulous-lora) | components.espressif.com / GitHub | **MIT** |
+| `jgromes/radiolib` v7 (for tr-lora) | components.espressif.com / GitHub | **MIT** |
 | `lvgl/lvgl` v9 (for spangap-lcd) | components.espressif.com / lvgl | **MIT** |
 | `espressif/esp_lcd_touch_gt911` (pulls `esp_lcd_touch`) | components.espressif.com | Apache-2.0 |
 | `espressif/esp_jpeg` (TJpgDec-based, for maps) | components.espressif.com | Apache-2.0 |

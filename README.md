@@ -1,8 +1,8 @@
-# reticulous-tdeck
+# hw-tdeck
 
 ## What is this?
 
-**reticulous-tdeck** is the application straddle that produces the
+**hw-tdeck** is the application straddle that produces the
 device image of [reticulous](https://github.com/reticulous) for the
 LilyGo T-Deck Plus (ESP32-S3FN16R8, 8 MB octal PSRAM, 16 MB flash,
 SX1262 LoRa, GPS, 320×240 ST7789 LCD, QWERTY keyboard, trackball).
@@ -24,7 +24,7 @@ hand-held device.
 ## What this straddle owns
 
 ```
-reticulous-tdeck/
+hw-tdeck/
 ├── straddle.yaml          requires: every reticulous-* + the spangap straddles it needs
 ├── esp-idf/
 │   └── main/
@@ -37,7 +37,7 @@ reticulous-tdeck/
 │       │                  ephemeral gps.* publish, standby on disable)
 │       ├── ports.h        ITS port constants (the few that are app-side)
 │       ├── ota_pubkey.h   the OTA verification key for this app (public)
-│       └── esp_idf_hal.h  pin-defs include path consumed by reticulous-lora
+│       └── esp_idf_hal.h  pin-defs include path consumed by tr-lora
 ├── partitions.csv         the app's partition layout (overrides platform default)
 ├── web-interface/         Quasar SPA shell — only the reticulous app shell
 │   ├── package.json       depends on spangap-browser (symlinked locally)
@@ -64,13 +64,13 @@ Every protocol piece is its own straddle:
 
 | Concern         | Straddle                                         |
 | --------------- | ------------------------------------------------ |
-| RNS core        | [reticulous-core](../reticulous-core)            |
-| TCP transport   | [reticulous-tcp](../reticulous-tcp)              |
-| AutoInterface   | [reticulous-auto](../reticulous-auto)            |
-| ESP-NOW         | [reticulous-espnow](../reticulous-espnow)        |
-| LoRa            | [reticulous-lora](../reticulous-lora)            |
-| LXMF messaging  | [reticulous-lxmf](../reticulous-lxmf)            |
-| Nomad pages     | [reticulous-nomad](../reticulous-nomad)          |
+| RNS core        | [rns](../rns)            |
+| TCP transport   | [tr-tcp](../tr-tcp)              |
+| AutoInterface   | [tr-auto](../tr-auto)            |
+| ESP-NOW         | [tr-espnow](../tr-espnow)        |
+| LoRa            | [tr-lora](../tr-lora)            |
+| LXMF messaging  | [lxmf](../lxmf)            |
+| Nomad pages     | [nomad](../nomad)          |
 | Offline maps    | [maps](../maps)                                  |
 | Platform        | [spangap-core / -net / -web / -lcd](../../s/)    |
 | Remote access   | [wg / acme / duckdns / upnp / ota](../../s/)     |

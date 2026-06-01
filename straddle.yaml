@@ -1,4 +1,4 @@
-# reticulous-tdeck — buildable straddle that builds the device image for the
+# hw-tdeck — buildable straddle that builds the device image for the
 # LilyGo T-Deck Plus.
 #
 # Owns the T-Deck Plus board HAL (tdeck.cpp/h: power/CS/reset, display/
@@ -9,20 +9,20 @@
 # dispatcher to init every staged straddle that declares an `init:` hook) and
 # the Quasar browser SPA shell all live here.
 schema_version: 1
-name: reticulous/reticulous-tdeck
+name: reticulous/hw-tdeck
 prefix: tdeck
 version: 0.1.0
 firmware: esp-idf
 browser: web-interface
 platforms: [idf]
 requires:
-  - reticulous/reticulous-core
-  - reticulous/reticulous-tcp
-  - reticulous/reticulous-auto
-  - reticulous/reticulous-espnow
-  - reticulous/reticulous-lora
-  - reticulous/reticulous-lxmf
-  - reticulous/reticulous-nomad
+  - reticulous/rns
+  - reticulous/tr-tcp
+  - reticulous/tr-auto
+  - reticulous/tr-espnow
+  - reticulous/tr-lora
+  - reticulous/lxmf
+  - reticulous/nomad
   - spangap/spangap-core
   - spangap/spangap-net
 optional_requires:
