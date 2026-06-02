@@ -113,11 +113,12 @@ copied here. They come from `spangap-browser` via the symlink
 
 ## Build details worth knowing
 
-- **Timezone data (`s.time.zones.json`)** is platform-owned: it lives
-  in spangap-core's `data/factory_state/` and ships into our `/fixed`
-  image via the data merge. Refresh from the spangap-core checkout
-  with `make timezones` (runs `update-zones.py`). Reticulous no longer
-  carries its own copy.
+- **Timezone data (`timezones.json`)** is platform-owned: it lives
+  in spangap-core's `data/factory_state/timezones.json` (a plain
+  user-state file, no longer an `s.time.zones` config blob) and ships
+  into our `/fixed` image via the data merge. Refresh from the
+  spangap-core checkout with `make timezones` (runs `update-zones.py`).
+  Reticulous no longer carries its own copy.
 - The committed `main/idf_component.yml` has **no** `path:` for
   `spangap/spangap-core` — the default build resolves it from the
   registry. `--spangap` injects a transient `path:` for the duration

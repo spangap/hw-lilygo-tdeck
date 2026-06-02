@@ -23,16 +23,19 @@ requires:
   - reticulous/tr-lora
   - reticulous/lxmf
   - reticulous/nomad
-  - spangap/spangap-core
+  # spangap-core is pulled in transitively by spangap-net (and rns, sshd, …),
+  # so it isn't listed here — depend on what you use directly, let the closure
+  # bring the foundation.
   - spangap/spangap-net
   - spangap/sshd
 optional_requires:
   # Default-on; drop with `spangap build --exclude <name>` (or the --no-lcd /
-  # --no-web shorthands). Straddles that declare an `init:` hook (wg, upnp,
-  # duckdns, maps, …) are brought up automatically by the generated
-  # spangapInitStraddles() dispatcher — no call site in main.cpp. The LCD/web
-  # central straddles still gate via CONFIG_SPANGAP_<NAME> shortcuts. Either
-  # way, absence compiles away cleanly.
+  # --no-web shorthands). Every one of these declares an `init:` hook, so the
+  # generated spangapInitStraddles() dispatcher brings it up with no call site
+  # in main.cpp — and when `--exclude`d it simply isn't staged, so its hook is
+  # never emitted. (lcd/web also expose the CONFIG_SPANGAP_LCD/WEB shortcuts
+  # other straddles gate their integration slices on.) Absence compiles away
+  # cleanly either way.
   - spangap/spangap-lcd
   - spangap/spangap-web
   - spangap/wg
