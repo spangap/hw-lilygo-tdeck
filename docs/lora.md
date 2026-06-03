@@ -1,7 +1,10 @@
-# lora — LoRa (SX1262) transport task
+# lora — LoRa transport task
 
-`lora.cpp/h` — SX1262 transport for RNS-over-LoRa. Owns the radio
-end-to-end: RadioLib + custom [`EspIdfHal`](../main/esp_idf_hal.h), DIO1
+`lora.cpp/h` (the [tr-lora](../../tr-lora) straddle) — RNS-over-LoRa transport.
+It drives **any RadioLib LoRa chip** (SX126x, SX127x/RFM9x, SX128x, LR11x0,
+LR2021), selected per-radio in Kconfig; the T-Deck Plus build below uses the
+**SX1262** on the shared SPI bus. Owns the radio end-to-end: RadioLib + custom
+[`EspIdfHal`](../main/esp_idf_hal.h), the chip's IRQ
 ISR, RNode on-air framing with split reassembly, half-duplex
 coordination, self-registration with rnsd as the `lora` iface. Pinned
 to core 0 alongside rnsd + net, priority 2, 8 KB PSRAM stack (slightly
@@ -13,9 +16,10 @@ see `component-plan.md` §12.
 
 ## Hardware
 
-Pin map and per-board hardware constants live in
-[`tdeck.h`](../main/tdeck.h), selected via `Kconfig.projbuild` →
-`CONFIG_RETICULOUS_BOARD_*`. Supported targets today:
+The LoRa radio pins come from tr-lora's `CONFIG_LORA*` (set in
+[`sdkconfig.defaults`](../sdkconfig.defaults)); the board's own peripheral
+constants live in [`tdeck.h`](../main/tdeck.h). There is no board-select
+Kconfig — hw-tdeck is the T-Deck Plus. T-Deck Plus values:
 
 | Define | T-Deck Plus |
 |---|---|
@@ -28,7 +32,7 @@ Pin map and per-board hardware constants live in
 | `BOARD_LORA_SCK_PIN` | 40 |
 | `BOARD_LORA_MOSI_PIN` | 41 |
 | `BOARD_LORA_MISO_PIN` | 38 |
-| `BOARD_LCD_CS_PIN` | 12 |
+| `CONFIG_LCD_CS_PIN` (lcd component) | 12 |
 | `BOARD_LORA_TCXO_VOLTAGE` | 1.8 V |
 | `BOARD_LORA_DIO2_RF_SWITCH` | 1 |
 
@@ -37,10 +41,8 @@ and the spangap platform requires octal PSRAM (PSRAM-backed ITS
 queues, PSRAM task stacks, a 256 KB WebRTC router buffer). Running
 on a no-PSRAM S3 would be a spangap-core fork, not a board entry.
 
-Adding a board = a new `Kconfig` choice entry + a new `#elif
-defined(CONFIG_RETICULOUS_BOARD_*)` block in `tdeck.h`. Driver code is
-board-agnostic; RadioLib's `SX1262` class works the same on every
-supported board.
+Driver code is board-agnostic; RadioLib's `SX1262` class works the same wherever
+the `CONFIG_LORA*` pins point.
 
 ## SPI is shared on T-Deck Plus
 
@@ -57,13 +59,10 @@ SX1262 (CS=9). Two consequences:
    wait after setting DIO3 as TCXO control — easier to fix at the
    rail).
 2. **The LCD CS pin must be parked HIGH** so the ST7789V doesn't drive
-   MISO on the shared bus while LoRa or SD is talking. The LCD has no
-   spangap driver yet, so [`main.cpp`](../main/main.cpp)'s
-   `parkSharedBusIdleCs()` (called from `app_main` before
-   `loraInit()`) drives `BOARD_LCD_CS_PIN` HIGH at boot. When a display
-   driver lands in spangap, the LCD becomes a registered SPI device
-   and its CS is handled automatically by `spi_bus_add_device`; the
-   `BOARD_LCD_CS_PIN` define and the parking block go away.
+   MISO on the shared bus while LoRa or SD is talking before the lcd
+   component claims the panel. `tdeckPreInit()`'s power/CS block parks
+   `CONFIG_LCD_CS_PIN` (and each `CONFIG_LORA*_CS_PIN`) HIGH at boot, ahead of
+   the SD probe inside `spangapInit()`.
 
 Bus init goes through spangap-core's `spiHelperInitBus` so future
 LCD/SD drivers sharing the bus stay idempotent.

@@ -185,15 +185,14 @@ by reset). The board uses native ESP32-S3 USB CDC — no FT2232 / CP210x.
   struct (`rnsd_transport_t`) + the `RNSD_DEST_*` frame opcodes consumers
   use. The `RNSD_PORT_DEST` connect struct itself is rnsd-private
   (lives in rnsd.cpp) — callers go through `rnsdDestOpen()`.
-- `tdeck.h`/`tdeck.cpp` — all T-Deck Plus board support. Per-target
-  `BOARD_*` constants (`CONFIG_RETICULOUS_BOARD_*`; T-Deck Plus only today —
-  Heltec WiFi LoRa 32 V3 was evaluated and rejected, no PSRAM, the spangap
-  platform requires octal PSRAM) plus the driver code: power/CS/reset, and
-  (CONFIG_SPANGAP_LCD) the display/touch/trackball/button HAL and the QWERTY
-  keyboard. Two-phase bring-up API around `spangapInit()`:
-  **`tdeckPreInit()`** before, **`tdeckPostInit()`** after — see
-  [docs/tdeck.md](docs/tdeck.md). The `BOARD_*` pin map is also consumed by
-  `lora.cpp` and `main.cpp`.
+- `tdeck.h`/`tdeck.cpp` — all T-Deck Plus board support. `BOARD_*` constants for
+  the board's bespoke peripherals (input + GNSS); no board-select Kconfig —
+  hw-tdeck is the T-Deck. The display pins are the lcd component's
+  (`CONFIG_LCD_*` in sdkconfig.defaults), the LoRa pins tr-lora's
+  (`CONFIG_LORA*`). Plus the driver code: power/CS, and (CONFIG_SPANGAP_LCD) the
+  touch/trackball/button input HAL (`lcd_input.h`) and the QWERTY keyboard.
+  Two-phase bring-up API around `spangapInit()`: **`tdeckPreInit()`** before,
+  **`tdeckPostInit()`** after — see [docs/tdeck.md](docs/tdeck.md).
 - `main.cpp` — `app_main`: **`tdeckPreInit()`** → `spangapInit()` →
   **`tdeckPostInit()`** → task inits → `spangapPostAppInit()`.
   `tdeckPreInit()` MUST run **before** `spangapInit()`: the first

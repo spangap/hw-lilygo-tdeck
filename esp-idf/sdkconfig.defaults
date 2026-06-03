@@ -23,6 +23,23 @@ CONFIG_SPANGAP_SDCARD_SPI_PIN_SCK=40
 CONFIG_SPANGAP_SDCARD_SPI_PIN_MOSI=41
 CONFIG_SPANGAP_SDCARD_SPI_PIN_MISO=38
 
+# T-Deck Plus — one SX1262 LoRa modem on the shared FSPI bus (host/SCK/MOSI/
+# MISO match the SD + display block above). Radio pins + type come from
+# tr-lora's Kconfig; only CS/DIO1/BUSY/RST differ per radio. TCXO is 1.8 V
+# and the SX1262 drives DIO2 as its own antenna switch.
+CONFIG_LORA_COUNT=1
+CONFIG_LORA_SPI_HOST=2
+CONFIG_LORA_SCK_PIN=40
+CONFIG_LORA_MOSI_PIN=41
+CONFIG_LORA_MISO_PIN=38
+CONFIG_LORA0_CS_PIN=9
+CONFIG_LORA0_DIO1_PIN=45
+CONFIG_LORA0_BUSY_PIN=13
+CONFIG_LORA0_RST_PIN=17
+CONFIG_LORA0_TCXO_MV=1800
+CONFIG_LORA0_DIO2_RF_SWITCH=y
+CONFIG_LORA0_RADIO_SX1262=y
+
 # microReticulum uses C++ exceptions extensively (every error path in
 # Identity, Packet, Cryptography, Persistence raises std::invalid_argument
 # or std::runtime_error). The spangap default disables them for code-size
@@ -45,10 +62,27 @@ CONFIG_ESP_IPC_TASK_STACK_SIZE=4096
 # the 1536-byte default.
 CONFIG_FREERTOS_IDLE_TASK_STACKSIZE=2048
 
-# ── On-device LCD UI (lcd module) ──────────────────────────────────────────
-# T-Deck Plus 2.8" ST7789 320x240 + optional GT911 touch on the shared SPI2
-# bus. board_lcd.cpp implements the lcd_board.h HAL contract.
-CONFIG_SPANGAP_LCD=y
+# ── On-device LCD UI (spangap-lcd) ──────────────────────────────────────────
+# Drop the whole UI with `spangap build --no-lcd`; presence of the spangap-lcd
+# straddle is the enable, so there is no CONFIG_SPANGAP_LCD line to set here. The
+# display — T-Deck Plus 2.8" ST7789 320x240 on the shared FSPI bus (SPI host /
+# SCK / MOSI / MISO match the SD block above) — is described entirely by the lcd
+# component's CONFIG_LCD_* below; tdeck.cpp supplies only the input HAL (GT911
+# touch, trackball, centre button). No dedicated panel reset (LCD_RST_PIN stays
+# -1; the panel resets with the BOARD_POWER_EN_PIN rail).
+CONFIG_LCD_SPI_HOST=2
+CONFIG_LCD_SCK_PIN=40
+CONFIG_LCD_MOSI_PIN=41
+CONFIG_LCD_MISO_PIN=38
+CONFIG_LCD_CS_PIN=12
+CONFIG_LCD_DC_PIN=11
+CONFIG_LCD_BL_PIN=42
+CONFIG_LCD_PCLK_MHZ=40
+CONFIG_LCD_CONTROLLER_ST7789=y
+CONFIG_LCD_NATIVE_WIDTH=240
+CONFIG_LCD_NATIVE_HEIGHT=320
+CONFIG_LCD_ROTATION_90=y
+CONFIG_LCD_INVERT_COLOR=y
 
 # LVGL v9 tuning. 16-bit colour matches the panel. Route LVGL's allocations
 # through the C heap so they land in PSRAM (spangap's malloc prefers PSRAM) and
@@ -60,11 +94,6 @@ CONFIG_LV_USE_CLIB_STRING=y
 # Montserrat 12 for the compact 4×3 launcher tile labels (default font is 14).
 CONFIG_LV_FONT_MONTSERRAT_12=y
 
-# Reset button as on/off switch (defaults s.sys.reset_on_off=1; state persists
-# in s.sys.power_on). On power-down main.cpp's hook drives BOARD_POWER_EN_PIN to
-# its inactive level and the device deep-sleeps until the next reset.
-CONFIG_SPANGAP_RESET_ON_OFF=y
-
 # IPv6 SLAAC: form a global address from router RAs so the device can reach
-# v6-only hosts (e.g. play.rop.nl off-VPN). Dial path is AF_UNSPEC.
+# v6-only hosts. Dial path is AF_UNSPEC.
 CONFIG_LWIP_IPV6_AUTOCONFIG=y

@@ -15,10 +15,9 @@
  *
  * What's left in app_main is only what isn't a staged straddle:
  *   - tdeckPreInit()/tdeckPostInit() — the board HAL (power rail, shared-SPI
- *     CS park, reset-on-off hook, display/touch/pointer/keyboard).
+ *     CS park, display/touch/pointer/keyboard).
  *   - gpsInit() — the T-Deck Plus GNSS receiver task, board-specific until a
  *     GPS service abstraction earns its own straddle.
- *   - the /state/net_up boot-script runner (consumer policy, not a straddle).
  *
  * Transports (tcp/auto/lora/espnow) self-register with rnsd via ITS on init —
  * rnsd has no compile-time knowledge of which transports exist.
@@ -27,31 +26,13 @@
  */
 #include "spangap.h"
 #include "tdeck.h"
-#include "net.h"   /* netRegister + NET_EV_UPSTREAM_UP for the boot-script runner */
 #include "gps.h"
-
-namespace {
-
-/* /state/net_up runs on NET_EV_UPSTREAM_UP. Used to live inside
- * spangap-core's spangapInit(), moved here when core stopped knowing about
- * net. spawnTask + cliRunFile + fsStatePath are core APIs (compat/cli/fs). */
-void netUpTask(void*) {
-    cliRunFile(fsStatePath("/net_up").c_str());
-    killSelf();
-}
-
-void onNetUp(const char*) {
-    spawnTask(netUpTask, "net_up", 4096, nullptr, 1, 1);
-}
-
-}  // namespace
 
 extern "C" void app_main(void)
 {
     /* Board prerequisites BEFORE spangapInit(): its fs_mount_sd() is the first
      * shared-bus access and needs the peripheral power rail up + idle CS parked;
-     * its lcdInit() needs the display/touch HAL already registered. tdeckPreInit()
-     * also installs the reset-on-off peripheral power-off hook. */
+     * its lcdInit() needs the display/touch HAL already registered. */
     tdeckPreInit();
 
     spangapInit();
@@ -68,11 +49,6 @@ extern "C" void app_main(void)
 
     /* GNSS receiver task — board hardware, not a staged straddle (yet). */
     gpsInit();
-
-    /* Boot-script runner on first STA-internet event. Registered after the
-     * dispatcher (which brings net up) but the upstream-up event is seconds
-     * away, long after this synchronous init returns, so it can't be missed. */
-    netRegister(NET_EV_UPSTREAM_UP, onNetUp);
 
     spangapPostAppInit();
 }

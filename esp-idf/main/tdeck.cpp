@@ -4,7 +4,7 @@
  * Single owner of all T-Deck Plus hardware bring-up. See tdeck.h for the API
  * contract and docs/tdeck.md for the module + hardware reference. Layout:
  *
- *   1. Peripheral power rail + shared-SPI CS park + reset-on-off power-down.
+ *   1. Peripheral power rail + shared-SPI CS park.
  *      Always compiled — SD and LoRa need the +3.3 V rail even with no on-device
  *      UI. Driven from tdeckPreInit() before spangapInit().
  *   2. [CONFIG_SPANGAP_LCD] ST7789V display + GT911 touch + trackball pointer +
@@ -13,7 +13,6 @@
  *   4. The two-phase public API (tdeckPreInit / tdeckPostInit).
  */
 #include "tdeck.h"
-#include "pm.h"             /* resetOnOffSetPowerOff */
 #include "log.h"            /* warn (i2c bus init) */
 
 #include "driver/gpio.h"
@@ -42,13 +41,6 @@
 static void tdeckPowerInit(void)
 {
 #if BOARD_POWER_EN_PIN >= 0
-    /* Release any deep-sleep pad hold left by a prior reset-on-off power-down
-     * (resetOnOffHandler → tdeckPeripheralPowerOff). Without this, if the hold
-     * survived the EN reset the rail would stay cut and the board would boot
-     * with dead peripherals. Harmless no-op when no hold is active. */
-    gpio_hold_dis((gpio_num_t)BOARD_POWER_EN_PIN);
-    gpio_deep_sleep_hold_dis();
-
     gpio_config_t pwr = {};
     pwr.pin_bit_mask = 1ULL << BOARD_POWER_EN_PIN;
     pwr.mode         = GPIO_MODE_OUTPUT;
@@ -74,26 +66,28 @@ static void tdeckPowerInit(void)
         gpio_config(&cfg);
         gpio_set_level((gpio_num_t)pin, 1);
     };
-#ifdef BOARD_LCD_CS_PIN
-    parkCsHigh(BOARD_LCD_CS_PIN);
+    /* The LCD CS pin comes from the lcd component's Kconfig (CONFIG_LCD_CS_PIN);
+     * park it HIGH before the SD probe (inside spangapInit, before lcdInit claims
+     * the pin) so the panel doesn't drive MISO. Defined only on an LCD build. */
+#if defined(CONFIG_LCD_CS_PIN)
+    parkCsHigh(CONFIG_LCD_CS_PIN);
 #endif
-#ifdef BOARD_LORA_CS_PIN
-    parkCsHigh(BOARD_LORA_CS_PIN);
+    /* LoRa radio CS pins come from tr-lora's Kconfig (CONFIG_LORA*). Park
+     * each configured radio's CS so it doesn't drive MISO during the SD
+     * probe (which runs inside spangapInit, before loraInit owns them). */
+#if defined(CONFIG_LORA0_CS_PIN)
+    parkCsHigh(CONFIG_LORA0_CS_PIN);
+#endif
+#if defined(CONFIG_LORA1_CS_PIN)
+    parkCsHigh(CONFIG_LORA1_CS_PIN);
+#endif
+#if defined(CONFIG_LORA2_CS_PIN)
+    parkCsHigh(CONFIG_LORA2_CS_PIN);
+#endif
+#if defined(CONFIG_LORA3_CS_PIN)
+    parkCsHigh(CONFIG_LORA3_CS_PIN);
 #endif
 }
-
-#if BOARD_POWER_EN_PIN >= 0
-/* Reset-on-off power-down hook (resetOnOffHandler calls this just before deep
- * sleep). Drive the master peripheral rail to its inactive level and hold the
- * pad through deep sleep so display/SD/GPS/LoRa stay unpowered until the next
- * reset re-runs tdeckPowerInit(). */
-static void tdeckPeripheralPowerOff(void)
-{
-    gpio_set_level((gpio_num_t)BOARD_POWER_EN_PIN, BOARD_POWER_EN_ACTIVE ? 0 : 1);
-    gpio_hold_en((gpio_num_t)BOARD_POWER_EN_PIN);
-    gpio_deep_sleep_hold_en();
-}
-#endif
 
 /* =========================================================================
  * 1b. Shared I2C0 master bus
@@ -122,19 +116,19 @@ i2c_master_bus_handle_t tdeckI2cBus(void) {
 }
 
 /* =========================================================================
- * 2. + 3. On-device UI: ST7789V display, GT911 touch, trackball pointer,
- *    centre/Home button (the lcd component's board HAL), and the QWERTY
- *    keyboard. Only compiled when the lcd module is enabled.
+ * 2. + 3. On-device UI input HAL — GT911 touch, trackball pointer, centre/Home
+ *    button — plus the QWERTY keyboard. Only compiled when the lcd module is
+ *    enabled. The display (SPI bus, ST7789 controller, backlight, orientation)
+ *    is owned by the lcd component (CONFIG_LCD_*); here we supply only input,
+ *    through the lcd_input.h contract.
  * ========================================================================= */
 #if CONFIG_SPANGAP_LCD
 
-#include "lcd_board.h"
+#include "lcd_input.h"
 #include "lcd.h"
-#include "spi_helper.h"
 #include "storage.h"
 #include "log.h"
 
-#include "driver/ledc.h"
 #include "driver/i2c_master.h"
 #include "esp_attr.h"
 #include "esp_timer.h"
@@ -146,151 +140,25 @@ i2c_master_bus_handle_t tdeckI2cBus(void) {
 #include <cstdio>
 #include <cstdlib>
 #include "esp_lcd_panel_io.h"
-#include "esp_lcd_panel_vendor.h"
-#include "esp_lcd_panel_ops.h"
 #include "esp_lcd_touch.h"
 #include "esp_lcd_touch_gt911.h"
 #include "lvgl.h"
 
-#define BL_MODE   LEDC_LOW_SPEED_MODE
-#define BL_TIMER  LEDC_TIMER_0
-#define BL_CH     LEDC_CHANNEL_0
-
-static esp_lcd_panel_handle_t  s_panel = nullptr;
-
 /* Forward declarations so the HAL ops table + cross-calls resolve regardless
  * of definition order. */
-static esp_lcd_panel_handle_t  tdeckLcdInit(esp_lcd_panel_io_handle_t* ioOut,
-                                            int* wOut, int* hOut);
-static void                    tdeckLcdShutdown(void);
-static void                    tdeckLcdBacklight(uint8_t level);
-static esp_lcd_touch_handle_t  tdeckTouchInit(void);
-static void                    tdeckButtonInit(void);
-static bool                    tdeckButtonRead(void);
-static void                    tdeckTrackballInit(void);
-static bool                    tdeckPointerRead(int* x, int* y);
+static void tdeckInputInit(void);
+static bool tdeckTouchRead(lcd_raw_pt_t* pts, int max, int* count);
+static bool tdeckClickRead(void);
+static void tdeckTrackballInit(void);
+static bool tdeckPointerRead(int* x, int* y);
 
-static void backlightInit(void) {
-    ledc_timer_config_t t = {};
-    t.speed_mode      = BL_MODE;
-    t.duty_resolution = LEDC_TIMER_8_BIT;       /* 0..255 */
-    t.timer_num       = BL_TIMER;
-    t.freq_hz         = 5000;
-    /* RC_FAST (not APB) so the PWM can keep toggling through light sleep — see
-     * tdeckLcdBacklight. RC_FAST is imprecise, but only duty matters here. */
-    t.clk_cfg         = LEDC_USE_RC_FAST_CLK;
-    ledc_timer_config(&t);
+/* GT911 handle, created in tdeckInputInit(); null if the controller didn't
+ * answer (then tdeckTouchRead reports no touches and the indev never fires). */
+static esp_lcd_touch_handle_t s_touch = nullptr;
 
-    /* Configure the channel exactly once — this is where GPIO42 gets reserved.
-     * Brightness changes afterwards are ledc_set_duty only (tdeckLcdBacklight),
-     * never another ledc_channel_config: re-running it re-reserves the pin and
-     * logs "GPIO 42 is not usable, maybe conflict with others" on every call. */
-    ledc_channel_config_t c = {};
-    c.gpio_num   = BOARD_LCD_BL_PIN;
-    c.speed_mode = BL_MODE;
-    c.channel    = BL_CH;
-    c.timer_sel  = BL_TIMER;
-    c.hpoint     = 0;
-    c.duty       = 0;                            /* start dark */
-    c.sleep_mode = LEDC_SLEEP_MODE_KEEP_ALIVE;
-    ledc_channel_config(&c);
-}
-
-static esp_lcd_panel_handle_t tdeckLcdInit(esp_lcd_panel_io_handle_t* ioOut,
-                                           int* wOut, int* hOut) {
-    /* Shared SPI2 bus (idempotent — SD/LoRa may already have brought it up). */
-    spi_bus_config_t bus = {};
-    bus.sclk_io_num     = BOARD_LORA_SCK_PIN;
-    bus.mosi_io_num     = BOARD_LORA_MOSI_PIN;
-    bus.miso_io_num     = BOARD_LORA_MISO_PIN;
-    bus.quadwp_io_num   = -1;
-    bus.quadhd_io_num   = -1;
-    bus.max_transfer_sz = 4096;
-    spiHelperInitBus(BOARD_LORA_SPI_HOST, &bus);
-
-    esp_lcd_panel_io_handle_t io = nullptr;
-    esp_lcd_panel_io_spi_config_t io_cfg = {};
-    io_cfg.cs_gpio_num       = BOARD_LCD_CS_PIN;
-    io_cfg.dc_gpio_num       = BOARD_LCD_DC_PIN;
-    io_cfg.pclk_hz           = BOARD_LCD_PCLK_HZ;
-    io_cfg.lcd_cmd_bits      = 8;
-    io_cfg.lcd_param_bits    = 8;
-    io_cfg.spi_mode          = 0;
-    io_cfg.trans_queue_depth = 10;
-    if (esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)(intptr_t)BOARD_LORA_SPI_HOST,
-                                 &io_cfg, &io) != ESP_OK) {
-        err("lcd: panel-io init failed\n");
-        return nullptr;
-    }
-
-    esp_lcd_panel_dev_config_t pcfg = {};
-    pcfg.reset_gpio_num = -1;                     /* resets with the power rail */
-    pcfg.rgb_ele_order  = LCD_RGB_ELEMENT_ORDER_RGB;
-    pcfg.bits_per_pixel = 16;
-    if (esp_lcd_new_panel_st7789(io, &pcfg, &s_panel) != ESP_OK) {
-        err("lcd: st7789 init failed\n");
-        return nullptr;
-    }
-
-    esp_lcd_panel_reset(s_panel);
-    esp_lcd_panel_init(s_panel);
-    esp_lcd_panel_invert_color(s_panel, true);    /* ST7789 panels need inversion */
-    esp_lcd_panel_swap_xy(s_panel, true);         /* 240x320 -> 320x240 landscape */
-    esp_lcd_panel_mirror(s_panel, true, false);   /* tweak if image is flipped */
-    esp_lcd_panel_disp_on_off(s_panel, true);
-
-    backlightInit();
-
-    /* Shared GPIO ISR service for the input INT lines (touch / button / keyboard).
-     * LoRa's DIO1 path also installs it with ESP_INTR_FLAG_IRAM — match the flag
-     * so whichever runs first wins; the loser gets ESP_ERR_INVALID_STATE. The lcd
-     * task can reach here before loraInit(), so we must not rely on LoRa for it. */
-    esp_err_t isr = gpio_install_isr_service(ESP_INTR_FLAG_IRAM);
-    if (isr != ESP_OK && isr != ESP_ERR_INVALID_STATE)
-        warn("lcd: gpio isr service: %s\n", esp_err_to_name(isr));
-
-    tdeckButtonInit();
-    tdeckTrackballInit();
-    /* The keyboard (I2C 0x55 + GPIO46 INT + its LVGL indev) comes up in
-     * tdeckPostInit() after spangapInit() — it needs the lcd task to exist.
-     * It shares this bus via tdeckI2cBus(). */
-
-    if (ioOut) *ioOut = io;
-    if (wOut)  *wOut  = BOARD_LCD_H_RES;
-    if (hOut)  *hOut  = BOARD_LCD_V_RES;
-    return s_panel;
-}
-
-static void tdeckLcdShutdown(void) {
-    tdeckLcdBacklight(0);
-    if (s_panel) esp_lcd_panel_disp_on_off(s_panel, false);
-}
-
-/* Panel standby for the lcd component's inactivity blank (backlight is cut by lcd
- * itself). disp_off retains GRAM, so wake is instant. The keyboard poll task is
- * left running — it already idles at 5 Hz (POLL_IDLE), enough for a keypress to
- * wake the screen via lcdNotifyActivity() in readCb. */
-static void tdeckDisplayPower(bool on) {
-    if (s_panel) esp_lcd_panel_disp_on_off(s_panel, on);
-}
-
-/* Brightness change only — the channel is already configured (backlightInit), so
- * this is a plain duty update, no ledc_channel_config (which would re-reserve the
- * GPIO and warn). The lcd task holds no NO_LIGHT_SLEEP lock, so the channel is
- * KEEP_ALIVE (clocked from RC_FAST): a dimmed screen stays dimmed across light
- * sleep rather than freezing at a random duty phase, and a constant 0/full level
- * is held just the same. (The ESP32-S3 lacks SOC_LEDC_SUPPORT_SLEEP_RETENTION, so
- * the lower-power NO_ALIVE_ALLOW_PD mode is rejected outright and there's no
- * domain power-down to gain from anyway.) */
-static void tdeckLcdBacklight(uint8_t level) {
-    uint32_t duty = (level == 255) ? (1u << 8) : level;   /* 8-bit: 256 = true 100% */
-    ledc_set_duty(BL_MODE, BL_CH, duty);
-    ledc_update_duty(BL_MODE, BL_CH);
-}
-
-static esp_lcd_touch_handle_t tdeckTouchInit(void) {
+static void tdeckTouchInit(void) {
     i2c_master_bus_handle_t i2c = tdeckI2cBus();
-    if (!i2c) return nullptr;
+    if (!i2c) return;
 
     /* Multi-touch is opt-in and ephemeral: a consumer (e.g. the maps app) sets
      * the runtime flag `tdeck.multi_touch` (no `s.` — not persisted, not a
@@ -300,13 +168,12 @@ static esp_lcd_touch_handle_t tdeckTouchInit(void) {
     NOW_AND_ON_CHANGE("tdeck.multi_touch", { lcdTouchSetMultipoint(atoi(val) != 0); });
 
     esp_lcd_touch_config_t tcfg = {};
-    /* Leave esp_lcd_touch IDENTITY and rotate the raw GT911 coords ourselves in
-     * touchReadCb. esp_lcd_touch mirrors the raw (pre-swap) coords using
-     * x_max/y_max and only then swaps, so the maxes get mis-paired with the
-     * swapped axes for this landscape orientation — no flag combo gets it right.
-     * So x_max/y_max here are the NATIVE portrait ranges (240w x 320h). */
-    tcfg.x_max         = BOARD_LCD_V_RES;   /* native width  = 240 */
-    tcfg.y_max         = BOARD_LCD_H_RES;   /* native height = 320 */
+    /* Leave esp_lcd_touch at IDENTITY (native coords) and let the lcd component
+     * rotate the points (lcdPanelOrientTouch) with the same CONFIG_LCD_ROTATION
+     * it applies to the pixels — so the maxes are the native ranges, matching
+     * CONFIG_LCD_NATIVE_WIDTH/HEIGHT. */
+    tcfg.x_max         = CONFIG_LCD_NATIVE_WIDTH;
+    tcfg.y_max         = CONFIG_LCD_NATIVE_HEIGHT;
     tcfg.rst_gpio_num  = (gpio_num_t)BOARD_TOUCH_RST_PIN;   /* -1 = none */
     tcfg.int_gpio_num  = (gpio_num_t)BOARD_TOUCH_INT_PIN;
     tcfg.flags.swap_xy  = 0;
@@ -345,18 +212,39 @@ static esp_lcd_touch_handle_t tdeckTouchInit(void) {
             gpio_set_intr_type((gpio_num_t)BOARD_TOUCH_INT_PIN, GPIO_INTR_ANYEDGE);
             gpio_isr_handler_add((gpio_num_t)BOARD_TOUCH_INT_PIN, lcdInputISR, nullptr);
             gpio_intr_enable((gpio_num_t)BOARD_TOUCH_INT_PIN);
-            return tp;
+            s_touch = tp;
+            return;
         }
         esp_lcd_panel_io_del(tio);   /* free and try the other address */
     }
     warn("touch: GT911 not found at 0x5D or 0x14\n");
     storageSet("tdeck.touch", "not found");
-    return nullptr;
 }
 
-/* Home/centre button on GPIO 0 (BOOT-strap pin, also the trackball centre-press;
- * shared with the mic, which reticulous never uses). Pulled-up active-low input;
- * the lcd component polls tdeckButtonRead() through a keypad indev. */
+/* lcd_input.h touch_read: pop the GT911's points in NATIVE coords; the lcd
+ * component applies the panel rotation. Returns false (no read) until the GT911
+ * is up. */
+static bool tdeckTouchRead(lcd_raw_pt_t* pts, int max, int* count) {
+    *count = 0;
+    if (!s_touch) return false;
+    esp_lcd_touch_point_data_t pt[5] = {};
+    uint8_t cnt = 0;
+    esp_lcd_touch_read_data(s_touch);
+    esp_lcd_touch_get_data(s_touch, pt, &cnt, max < 5 ? (uint8_t)max : 5);
+    int n = cnt > max ? max : cnt;
+    for (int i = 0; i < n; i++) { pts[i].x = (int16_t)pt[i].x; pts[i].y = (int16_t)pt[i].y; }
+    *count = n;
+    return true;
+}
+
+/* ---- centre / Home button (GPIO 0) ----
+ * GPIO 0 is the BOOT-strap pin, also the trackball centre-press (shared with the
+ * mic, which reticulous never uses). Pulled-up active-low. The board owns the
+ * click-vs-hold policy: tdeckClickRead() asserts a click on a short press, while
+ * a >=300ms hold goes Home via lcdGoHome() — the lcd component applies no timing. */
+static lv_timer_t* s_holdTimer = nullptr;
+static bool        s_btnLong   = false;   /* hold fired → suppress the release click */
+
 static void tdeckButtonInit(void) {
     gpio_config_t io = {};
     io.pin_bit_mask = 1ULL << BOARD_HOME_BTN_PIN;
@@ -365,13 +253,39 @@ static void tdeckButtonInit(void) {
     io.pull_down_en = GPIO_PULLDOWN_DISABLE;
     io.intr_type    = GPIO_INTR_ANYEDGE;   /* wake on both press and release */
     gpio_config(&io);
-    /* lcdInputISR wakes the lcd task on each edge; buttonReadCb (event mode)
-     * turns press+release into a click and a >=300ms hold into "go home". */
+    /* lcdInputISR wakes the lcd task on each edge; tdeckClickRead() (event mode)
+     * runs the click-vs-hold state machine from there. */
     gpio_isr_handler_add((gpio_num_t)BOARD_HOME_BTN_PIN, lcdInputISR, nullptr);
 }
 
-static bool tdeckButtonRead(void) {
-    return gpio_get_level((gpio_num_t)BOARD_HOME_BTN_PIN) == 0;   /* active-low */
+/* One-shot hold deadline (lcd task, via lv_timer): a press still held at 300ms is
+ * a "go Home", not a click. */
+static void btnHoldCb(lv_timer_t*) {
+    s_holdTimer = nullptr;   /* the one-shot self-deleted after this fire */
+    s_btnLong   = true;      /* tell the release edge not to make it a click */
+    lcdGoHome();
+}
+
+/* lcd_input.h click_read (lcd task): the click-vs-hold state machine. Arms a
+ * 300ms one-shot on press; on release within that window asserts the click for
+ * exactly one poll (the component forces the follow-up read that lands the
+ * release → LVGL sees a click). A >=300ms hold fires Home and is not clicked. */
+static bool tdeckClickRead(void) {
+    static enum { IDLE, HELD } phase = IDLE;
+    bool down = gpio_get_level((gpio_num_t)BOARD_HOME_BTN_PIN) == 0;   /* active-low */
+    if (down) {
+        if (phase == IDLE) {
+            phase = HELD;
+            s_btnLong = false;
+            s_holdTimer = lv_timer_create(btnHoldCb, 300, nullptr);
+            lv_timer_set_repeat_count(s_holdTimer, 1);   /* one-shot */
+        }
+        return false;                               /* never click while held */
+    }
+    if (s_holdTimer) { lv_timer_delete(s_holdTimer); s_holdTimer = nullptr; }
+    bool click = (phase == HELD && !s_btnLong);     /* short press → click on release */
+    phase = IDLE;
+    return click;
 }
 
 /* ---- trackball -> mouse pointer ----
@@ -449,7 +363,10 @@ static bool tdeckPointerRead(int* x, int* y) {
     for (int i = 0; i < TB_N; i++) { c[i] = (int)s_tbCount[i]; s_tbCount[i] = 0; }
     portEXIT_CRITICAL(&s_tbMux);
 
-    if (s_ptrX < 0) { s_ptrX = BOARD_LCD_H_RES / 2; s_ptrY = BOARD_LCD_V_RES / 2; }
+    /* Clamp to the actual (post-rotation) panel; the lcd component owns the size. */
+    int scrW = 0, scrH = 0;
+    lcdDisplaySize(&scrW, &scrH);
+    if (s_ptrX < 0) { s_ptrX = scrW / 2; s_ptrY = scrH / 2; }
 
     int dxp = c[TB_RIGHT] - c[TB_LEFT];     /* signed pulse delta this read */
     int dyp = c[TB_DOWN]  - c[TB_UP];
@@ -505,8 +422,8 @@ static bool tdeckPointerRead(int* x, int* y) {
         dbg("tball vel=%.0f/s accel=%.2f step=%.1f\n", (double)s_tbVel, (double)accel, (double)step);
     }
 
-    s_ptrX = std::clamp(s_ptrX + dx, 0, BOARD_LCD_H_RES - 1);
-    s_ptrY = std::clamp(s_ptrY + dy, 0, BOARD_LCD_V_RES - 1);
+    s_ptrX = std::clamp(s_ptrX + dx, 0, scrW - 1);
+    s_ptrY = std::clamp(s_ptrY + dy, 0, scrH - 1);
     *x = s_ptrX;
     *y = s_ptrY;
     return moved;
@@ -534,19 +451,26 @@ static void tdeckSettingsPane(void* arg) {
     lcdSettingSlider (p, "Sleep after (s)",  "s.lcd.inactivity_timeout",     0, 120);
 }
 
-/* Register this board's HAL with the lcd component. Called from tdeckPreInit()
- * before spangapInit(). */
-static void tdeckLcdRegister(void) {
-    static const lcd_board_t ops = {
-        .init        = tdeckLcdInit,
-        .shutdown    = tdeckLcdShutdown,
-        .backlight   = tdeckLcdBacklight,
-        .display_power = tdeckDisplayPower,
-        .touch_init  = tdeckTouchInit,
-        .button_read = tdeckButtonRead,
+/* lcd_input.h init hook — runs on the lcd task once the panel and the shared
+ * GPIO ISR service are up. Wire the board's input: GT911 touch, centre button,
+ * trackball. */
+static void tdeckInputInit(void) {
+    tdeckButtonInit();
+    tdeckTrackballInit();
+    tdeckTouchInit();
+}
+
+/* Register this board's input HAL with the lcd component. Called from
+ * tdeckPreInit() before spangapInit(). The display itself is the component's
+ * (CONFIG_LCD_*); we supply only input. */
+static void tdeckInputRegister(void) {
+    static const lcd_input_t ops = {
+        .init         = tdeckInputInit,
+        .touch_read   = tdeckTouchRead,
         .pointer_read = tdeckPointerRead,
+        .click_read   = tdeckClickRead,
     };
-    lcdSetBoard(&ops);
+    lcdSetInput(&ops);
     lcdRegisterSettings("T-Deck", "T-Deck", tdeckSettingsPane);
 }
 
@@ -746,11 +670,8 @@ void tdeckPreInit(void) {
      * (lcd task), keyboard (kbpoll task) and the RTC (gps task) all bring it up
      * lazily and could otherwise race i2c_new_master_bus() on the same port. */
     tdeckI2cBus();
-#if BOARD_POWER_EN_PIN >= 0
-    resetOnOffSetPowerOff(tdeckPeripheralPowerOff);
-#endif
 #if CONFIG_SPANGAP_LCD
-    tdeckLcdRegister();                     /* display/touch/pointer HAL → lcd */
+    tdeckInputRegister();                   /* touch/pointer/button input HAL → lcd */
 #endif
 }
 

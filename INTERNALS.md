@@ -26,8 +26,10 @@ The very first shared-SPI-bus access is `fs_mount_sd()` *inside*
    wait ~100 ms for settle.
 2. **LCD and SX1262 LoRa CS lines parked HIGH** so neither drives MISO
    during the SD/LoRa probe.
-3. **Display HAL registered** with `lcd_board.h` so
-   `spangapInit()`'s `lcdInit()` can bring up the LVGL screen.
+3. **Input HAL registered** via `lcdSetInput()` (`lcd_input.h`) so the lcd
+   task can wire touch/trackball/button once `spangapInit()`'s `lcdInit()`
+   brings the panel up. The panel itself is the lcd component's, from
+   `CONFIG_LCD_*`.
 
 `tdeckPostInit()` runs **after** `spangapInit()` because the QWERTY
 keyboard needs the `lcd` task `spangapInit()` created. `loraInit()`
@@ -37,10 +39,12 @@ later re-asserts the power pin (idempotent no-op).
 
 All T-Deck Plus board support lives here:
 
-- Per-target `BOARD_*` constants
-  (`CONFIG_RETICULOUS_BOARD_*` — T-Deck Plus only today).
-- Power / CS / reset routing.
-- `CONFIG_SPANGAP_LCD`-gated: the display/touch/trackball/button HAL
+- The board's bespoke-peripheral `BOARD_*` constants (input + GNSS pins).
+  No board-select Kconfig — hw-tdeck is the T-Deck. The display pins live in
+  the lcd component's `CONFIG_LCD_*` (sdkconfig.defaults); the LoRa pins in
+  tr-lora's `CONFIG_LORA*`.
+- Power / CS routing.
+- `CONFIG_SPANGAP_LCD`-gated: the touch/trackball/button input HAL
   and the QWERTY keyboard. The keyboard owns its own I²C / indev /
   ISR / poll and **self-heals to interrupt-driven** (if a stuck-low
   interrupt is detected it falls back to polling, then re-arms when

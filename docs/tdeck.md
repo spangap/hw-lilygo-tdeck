@@ -20,19 +20,20 @@ T-Deck-specific that the platform layer stays generic about.
 
 **Public surface (`tdeck.h`).** Two things:
 
-1. **The board pin map** — compile-time `BOARD_*` constants (LoRa pins + SPI host
-   + TCXO; display / touch / trackball / keyboard pins; the peripheral power-
-   enable pin), selected by `Kconfig.projbuild` → `CONFIG_RETICULOUS_BOARD_*`.
-   Consumed by `lora.cpp` (the SX1262 pin map), `main.cpp`, and the module's own
-   driver code. Add a board = add a Kconfig `choice` entry + a constants block.
+1. **The board pin map** — compile-time `BOARD_*` constants for the board's
+   bespoke peripherals (touch / trackball / keyboard / centre button; GNSS; the
+   peripheral power-enable pin), consumed by `tdeck.cpp` and `gps.cpp`. There is
+   no board-select Kconfig — hw-tdeck is the T-Deck. The **display** pins live in
+   the lcd component's `CONFIG_LCD_*` (sdkconfig.defaults); the **LoRa** pins in
+   tr-lora's `CONFIG_LORA*`.
 2. **The bring-up API** — `tdeckPreInit()` and `tdeckPostInit()`.
 
 **Two-phase init (why it isn't one call).** Bring-up straddles `spangapInit()`:
 
 | Phase | When | Does |
 |---|---|---|
-| `tdeckPreInit()`  | **before** `spangapInit()` | drive the +3.3 V peripheral rail HIGH; park the shared-SPI CS lines (LCD + LoRa) so they don't drive MISO; install the reset-on-off power-down hook; *(CONFIG_SPANGAP_LCD)* register the display/touch/pointer HAL with `lcd` |
-| *(spangapInit)* | — | mounts SD over the shared SPI bus (needs the rail + parked CS), then `lcdInit()` brings the panel up through the registered HAL (→ button + trackball init) |
+| `tdeckPreInit()`  | **before** `spangapInit()` | drive the +3.3 V peripheral rail HIGH; park the shared-SPI CS lines (LCD + LoRa) so they don't drive MISO; *(CONFIG_SPANGAP_LCD)* register the touch/pointer/button input HAL with `lcd` (`lcdSetInput`) |
+| *(spangapInit)* | — | mounts SD over the shared SPI bus (needs the rail + parked CS), then `lcdInit()` brings the panel up from `CONFIG_LCD_*` and calls the input HAL's `init()` (→ touch + button + trackball wiring) |
 | `tdeckPostInit()` | **after** `spangapInit()` | *(CONFIG_SPANGAP_LCD)* bring up the QWERTY keyboard — it needs the lcd task `spangapInit()` created |
 
 It can't collapse to one call: the power rail must be up before `spangapInit()`'s
@@ -40,12 +41,13 @@ first shared-bus access (`fs_mount_sd()`), the HAL must be registered before its
 `lcdInit()`, but the keyboard needs the lcd task `spangapInit()` creates.
 `main.cpp` is correspondingly thin — `tdeckPreInit(); spangapInit(); tdeckPostInit();`.
 
-**What it owns.** The power/CS/reset glue is always compiled (SD and LoRa need the
-rail even with no UI). Under `CONFIG_SPANGAP_LCD` it additionally drives — and
-registers as the `lcd` board HAL:
+**What it owns.** The power/CS glue is always compiled (SD and LoRa need the
+rail even with no UI). The ST7789V display itself is **not** the board's — the lcd
+component brings it up from `CONFIG_LCD_*` (320×240, esp_lcd, LEDC-PWM backlight).
+Under `CONFIG_SPANGAP_LCD` the board registers, as the `lcd` input HAL
+(`lcd_input.h`):
 
-- **ST7789V display** (320×240, esp_lcd; LEDC-PWM backlight that survives light sleep)
-- **GT911 capacitive touch** (probed at 0x5D/0x14; interrupt-driven)
+- **GT911 capacitive touch** (probed at 0x5D/0x14; interrupt-driven) → `touch_read`
 - **Trackball → mouse pointer** with velocity-dependent acceleration — the module
   owns the whole pointing device (the curve *and* the settings)
 - **Centre/Home button** (GPIO 0) → the pointer's click / hold-to-Home
@@ -57,8 +59,8 @@ registers as the `lcd` board HAL:
 (pointer speed 4–40) and `s.tdeck.pointer_visible_time` (cursor dwell seconds,
 `-1` = always). It also surfaces the generic `s.lcd.backlight`.
 
-The board-HAL contract itself (what `lcd` expects of any board) is spangap-core's
-`lcd_board.h` — see [`../../spangap/docs/lcd.md`](../../spangap/docs/lcd.md). The
+The input-HAL contract itself (what `lcd` expects of any board) is spangap-lcd's
+`lcd_input.h` — see [`../../spangap/docs/lcd.md`](../../spangap/docs/lcd.md). The
 deep wiring (the interrupt-driven indev model, the pointer-acceleration math, the
 keyboard's self-healing INT) is in **§1.8** below.
 
@@ -701,14 +703,16 @@ GPIO numbers refer to the host ESP32-S3 in all cases.
 The on-device UI is **spangap-core's `lcd` LVGL component** (launcher + status
 bar + built-in Settings), gated on `CONFIG_SPANGAP_LCD` — not a reticulous widget
 set. The software architecture (LVGL bring-up, the lcd task loop, the focus
-group, Settings panes, the board HAL contract) lives in
+group, Settings panes, the panel Kconfig + input HAL contract) lives in
 [../../spangap/docs/lcd.md](../../spangap/docs/lcd.md). This section is only the
 **T-Deck Plus hardware wiring** behind that contract; the board layer is
 [../main/tdeck.cpp](../main/tdeck.cpp).
 
 **Display.** ST7789V (320×240, RGB565) on the shared SPI2 bus via `esp_lcd` —
 CS 12, DC 11, no RST (resets with the +3.3 V rail behind GPIO 10), backlight LEDC
-PWM on GPIO 42. LVGL renders into two ~6-line DMA strips
+PWM on GPIO 42. These are the lcd component's `CONFIG_LCD_*` (set in
+`sdkconfig.defaults`), not board code — `lcd_panel.cpp` brings the panel up and
+the board contributes no display driver. LVGL renders into two ~6-line DMA strips
 (`LV_DISPLAY_RENDER_MODE_PARTIAL`); there is **no full framebuffer in RAM** to
 read back.
 
@@ -726,9 +730,9 @@ lcd task and bumps lcd via `lcdRun()`.
 
 | Device | INT pin(s) | Edge | Read path | LVGL indev | Owner |
 |---|---|---|---|---|---|
-| GT911 touch | GPIO 16 | `ANYEDGE` | I2C via `esp_lcd_touch` | pointer | lcd (board HAL) |
-| Trackball — 4 direction lines | GPIO 3 / 15 / 1 / 2 (U/D/L/R) | `NEGEDGE` | count falling edges → cursor position | pointer (visible cursor) | lcd (board HAL) |
-| Centre button | GPIO 0 | `ANYEDGE` | `gpio_get_level` | → the trackball pointer's click | lcd (board HAL) |
+| GT911 touch | GPIO 16 | `ANYEDGE` | I2C via `esp_lcd_touch` → `touch_read` (raw native; lcd rotates) | pointer | `tdeck.cpp` input HAL |
+| Trackball — 4 direction lines | GPIO 3 / 15 / 1 / 2 (U/D/L/R) | `NEGEDGE` | count falling edges → cursor position (`pointer_read`) | pointer (visible cursor) | `tdeck.cpp` input HAL |
+| Centre button | GPIO 0 | `ANYEDGE` | `gpio_get_level` → `click_read` (board owns click-vs-300ms-hold → `lcdGoHome`) | → the trackball pointer's click | `tdeck.cpp` input HAL |
 | QWERTY keyboard (C3) | GPIO 46 (dead — see above) | `ANYEDGE` | I2C 1-byte read @ `0x55`, **polled** | keypad | `tdeck.cpp` (not lcd) |
 
 - **`ANYEDGE` for touch / button / keyboard INT:** INT polarity is sub-revision /

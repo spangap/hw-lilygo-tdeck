@@ -55,7 +55,6 @@
 #include "gps.h"
 #include "tdeck.h"
 #include "rtc.h"
-#include "ntp.h"
 #include "spangap.h"
 
 #include "driver/uart.h"
@@ -153,7 +152,7 @@ static bool          s_ignoreClock = false;     /* s.gps.ignore_clock: leave the
 static int           s_rtcPresent  = -1;        /* -1 unknown, 0 absent, 1 present (probed once at boot) */
 static int64_t       s_lastGpsDisciplineUs = 0; /* esp_timer when GPS last drove the clock, 0 = never */
 static int64_t       s_lastHeartbeatUs = 0;     /* esp_timer of last gpsHeartbeat() */
-static bool          s_ntpInhibited = false;    /* mirror of what we last told ntp (avoid redundant calls) */
+static bool          s_ownsClock = false;       /* mirror of our last sys.time.ext write (avoid redundant writes) */
 
 /* ─────────────── NMEA helpers ─────────────── */
 
@@ -440,11 +439,15 @@ static void logTimeUpdate(const char* src, int64_t deltaUs) {
     else                   warn("%s time update %+.1f s",  src, s);
 }
 
-/* Hand the clock to ntp, or take it away. We own the clock (inhibit ntp) only
- * while it is valid AND we have seen GPS time within the staleness window;
- * otherwise — clock invalid, gone stale, or the user pinned us off — ntp gets
- * it back. Mirrors the last decision so we only call ntpInhibit on a change. */
-static void ntpReconcile(void) {
+/* Claim the system clock, or hand it back. We own it only while it is valid
+ * AND we have seen GPS time within the staleness window; otherwise — clock
+ * invalid, gone stale, or the user pinned us off — we release it. The claim is
+ * published on the storage bus as sys.time.ext (1 = a local authority owns the
+ * clock); ntp subscribes and parks SNTP while it's set. Going through storage
+ * keeps GPS free of any compile-time dependency on net — with no net staged
+ * there's simply no subscriber, and GPS owns the clock outright. Mirrors the
+ * last decision so we only write on a change. */
+static void clockOwnershipReconcile(void) {
     bool desired;
     if (s_ignoreClock) {
         desired = false;
@@ -456,10 +459,10 @@ static void ntpReconcile(void) {
         bool    fresh = s_lastGpsDisciplineUs != 0 && age <= stale;
         desired = valid && fresh;
     }
-    if (desired != s_ntpInhibited) {
-        ntpInhibit(desired);
-        s_ntpInhibited = desired;
-        dbg("ntp %s", desired ? "inhibited (GPS time)" : "released");
+    if (desired != s_ownsClock) {
+        storageSet("sys.time.ext", desired ? 1 : 0);
+        s_ownsClock = desired;
+        dbg("clock %s", desired ? "claimed (GPS time)" : "released");
     }
 }
 
@@ -507,7 +510,7 @@ static void gpsDisciplineFromGps(void) {
     storageSet("sys.time.valid", 1);
 
     s_lastGpsDisciplineUs = esp_timer_get_time();
-    ntpReconcile();
+    clockOwnershipReconcile();
 }
 
 /* Boot: adopt the RTC's time if it's trustworthy and the system clock is unset,
@@ -548,7 +551,7 @@ static void rtcBootSync(void) {
  * RTC (the brief's fallback keeper) and log the drift between them at debug.
  * Also reconciles ntp ownership as the GPS-staleness window expires. */
 static void gpsHeartbeat(void) {
-    if (s_ignoreClock) { ntpReconcile(); return; }
+    if (s_ignoreClock) { clockOwnershipReconcile(); return; }
 
     int64_t now = esp_timer_get_time();
     bool gpsCoverage = s_lastGpsDisciplineUs != 0 &&
@@ -576,7 +579,7 @@ static void gpsHeartbeat(void) {
             }
         }
     }
-    ntpReconcile();
+    clockOwnershipReconcile();
 }
 
 static void publishFix(void) {

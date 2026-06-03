@@ -30,9 +30,10 @@ hw-tdeck/
 │   └── main/
 │       ├── main.cpp       app_main: tdeckPreInit → spangapInit → tdeckPostInit →
 │       │                  task inits → spangapPostAppInit
-│       ├── tdeck.{cpp,h}  T-Deck Plus board HAL: power/CS/reset, display/touch/
-│       │                  trackball/button HAL, QWERTY keyboard (own I2C/indev/
-│       │                  ISR/poll, self-heals to interrupt-driven)
+│       ├── tdeck.{cpp,h}  T-Deck Plus board support: power/CS, the lcd input HAL
+│       │                  (touch/trackball/button), QWERTY keyboard (own I2C/indev/
+│       │                  ISR/poll, self-heals to interrupt-driven). Panel pins are
+│       │                  the lcd component's CONFIG_LCD_* (sdkconfig.defaults).
 │       ├── gps.{cpp,h}    GNSS receiver task (dual-chip autobaud, NMEA parse,
 │       │                  ephemeral gps.* publish, standby on disable)
 │       ├── ports.h        ITS port constants (the few that are app-side)

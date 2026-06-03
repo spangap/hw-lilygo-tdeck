@@ -4,10 +4,10 @@
 # Owns the T-Deck Plus board HAL (tdeck.cpp/h: power/CS/reset, display/
 # touch/trackball/button HAL, QWERTY keyboard) and the GNSS receiver task
 # (gps.cpp/h — board-specific until a GPS service abstraction earns its
-# own straddle). The partition layout, OTA pubkey, app_main (which brings up
-# the net foundation, then calls the build-generated spangapInitStraddles()
-# dispatcher to init every staged straddle that declares an `init:` hook) and
-# the Quasar browser SPA shell all live here.
+# own straddle). The partition layout, OTA pubkey, app_main (which calls
+# spangapInit() for the platform core, then the build-generated
+# spangapInitStraddles() dispatcher to init every staged straddle that declares
+# an `init:` hook) and the Quasar browser SPA shell all live here.
 schema_version: 1
 name: reticulous/hw-tdeck
 prefix: tdeck
@@ -15,34 +15,34 @@ version: 0.1.0
 firmware: esp-idf
 browser: web-interface
 platforms: [idf]
-requires:
+# No hard requires:. spangap-core is implicit (the empty-prefix platform
+# foundation, always staged), and every feature below is optional — this
+# buildable is a pure menu, all default-on, any subset droppable. Drop one
+# with `spangap build --exclude <name>` (or --no-lcd / --no-web / --no-net),
+# and the cascade takes its hard dependents with it: e.g. --no-net also drops
+# web/sshd/upnp/wg/duckdns/acme and the IP transports tr-tcp/-auto/-espnow,
+# leaving a LoRa-only image. Every entry declares an `init:` hook, so the
+# generated spangapInitStraddles() dispatcher brings it up with no call site in
+# main.cpp; when dropped its hook is simply never emitted. (lcd/web also expose
+# the CONFIG_SPANGAP_LCD/WEB shortcuts other straddles gate their integration
+# slices on.) Absence compiles away cleanly either way.
+optional_requires:
   - reticulous/rns
+  - reticulous/tr-lora
   - reticulous/tr-tcp
   - reticulous/tr-auto
   - reticulous/tr-espnow
-  - reticulous/tr-lora
   - reticulous/lxmf
   - reticulous/nomad
-  # spangap-core is pulled in transitively by spangap-net (and rns, sshd, …),
-  # so it isn't listed here — depend on what you use directly, let the closure
-  # bring the foundation.
+  - reticulous/maps
   - spangap/spangap-net
-  - spangap/sshd
-optional_requires:
-  # Default-on; drop with `spangap build --exclude <name>` (or the --no-lcd /
-  # --no-web shorthands). Every one of these declares an `init:` hook, so the
-  # generated spangapInitStraddles() dispatcher brings it up with no call site
-  # in main.cpp — and when `--exclude`d it simply isn't staged, so its hook is
-  # never emitted. (lcd/web also expose the CONFIG_SPANGAP_LCD/WEB shortcuts
-  # other straddles gate their integration slices on.) Absence compiles away
-  # cleanly either way.
   - spangap/spangap-lcd
   - spangap/spangap-web
+  - spangap/sshd
   - spangap/wg
   - spangap/upnp
   - spangap/duckdns
   - spangap/acme
-  - reticulous/maps
 # OTA is not listed here. It halves available flash (paired A/B partitions)
 # and is currently lightly tested, so it's left out of the default and
 # optional sets. Pull it in ad-hoc with `spangap build --include spangap/ota`.
