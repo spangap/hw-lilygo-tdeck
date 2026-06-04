@@ -27,6 +27,3 @@ dependencies:
   # against under CONFIG_SPANGAP_LCD.
   espressif/esp_lcd_touch_gt911:
     version: "^1.1"
-  # JPEG tile decode for the on-device map (maps.cpp), TJpgDec-based.
-  espressif/esp_jpeg:
-    version: "^1.1"
