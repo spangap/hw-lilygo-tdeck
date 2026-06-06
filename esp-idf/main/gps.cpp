@@ -11,7 +11,7 @@
  *
  * There is no independent GPS power switch on this board — the receiver hangs
  * off the shared BOARD_POWER_EN_PIN rail with the display/SD/LoRa, already
- * driven HIGH by tdeckPreInit(). We can't cut its power, so on disable we put
+ * driven HIGH by tdeckStart(). We can't cut its power, so on disable we put
  * the chip into standby over the UART instead, then tear the UART down:
  *   - u-blox M10: UBX-RXM-PMREQ software backup — real low power, wakes on a
  *     UART RX edge (so on re-enable a dummy byte revives it; see gpsAutobaud).

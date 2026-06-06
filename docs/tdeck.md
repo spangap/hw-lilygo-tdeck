@@ -25,7 +25,7 @@ T-Deck-specific that the platform layer stays generic about.
    peripheral power-enable pin), consumed by `tdeck.cpp` and `gps.cpp`. There is
    no board-select Kconfig — hw-tdeck is the T-Deck. The **display** pins live in
    the lcd component's `CONFIG_LCD_*` (sdkconfig.defaults); the **LoRa** pins in
-   tr-lora's `CONFIG_LORA*`.
+   iface-lora's `CONFIG_LORA*`.
 2. **The bring-up API** — `tdeckPreInit()` and `tdeckPostInit()`.
 
 **Two-phase init (why it isn't one call).** Bring-up straddles `spangapInit()`:

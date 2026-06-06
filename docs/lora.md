@@ -1,6 +1,6 @@
 # lora — LoRa transport task
 
-`lora.cpp/h` (the [tr-lora](../../tr-lora) straddle) — RNS-over-LoRa transport.
+`lora.cpp/h` (the [iface-lora](../../iface-lora) straddle) — RNS-over-LoRa transport.
 It drives **any RadioLib LoRa chip** (SX126x, SX127x/RFM9x, SX128x, LR11x0,
 LR2021), selected per-radio in Kconfig; the T-Deck Plus build below uses the
 **SX1262** on the shared SPI bus. Owns the radio end-to-end: RadioLib + custom
@@ -16,7 +16,7 @@ see `component-plan.md` §12.
 
 ## Hardware
 
-The LoRa radio pins come from tr-lora's `CONFIG_LORA*` (set in
+The LoRa radio pins come from iface-lora's `CONFIG_LORA*` (set in
 [`sdkconfig.defaults`](../sdkconfig.defaults)); the board's own peripheral
 constants live in [`tdeck.h`](../main/tdeck.h). There is no board-select
 Kconfig — hw-tdeck is the T-Deck Plus. T-Deck Plus values:
@@ -37,9 +37,11 @@ Kconfig — hw-tdeck is the T-Deck Plus. T-Deck Plus values:
 | `BOARD_LORA_DIO2_RF_SWITCH` | 1 |
 
 Heltec WiFi LoRa 32 V3 was evaluated and rejected: it has no PSRAM,
-and the spangap platform requires octal PSRAM (PSRAM-backed ITS
-queues, PSRAM task stacks, a 256 KB WebRTC router buffer). Running
-on a no-PSRAM S3 would be a spangap-core fork, not a board entry.
+and the spangap platform requires PSRAM (PSRAM-backed ITS queues,
+PSRAM task stacks, a 256 KB WebRTC router buffer). Running on a
+no-PSRAM S3 would be a spangap-core fork, not a board entry. Octal
+vs quad is the board's call — the T-Deck (S3R8) is octal, the later
+Heltec V4 (S3R2) is quad; see the `hw-heltecv4` straddle.
 
 Driver code is board-agnostic; RadioLib's `SX1262` class works the same wherever
 the `CONFIG_LORA*` pins point.

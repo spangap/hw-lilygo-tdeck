@@ -11,6 +11,16 @@ dependencies.lock
 staging/
 sdkconfig
 sdkconfig.old
+# sdkconfig.defaults is LOCAL SCRATCH only — deliberately NOT committed (this
+# inverts ESP-IDF's usual "commit your defaults" convention). What a straddle
+# DISTRIBUTES it declares explicitly in straddle.yaml `kconfig:`, which is
+# collected for every staged straddle. A committed defaults file would be a
+# trap: in a non-buildable straddle it is never read at all, and even in a
+# buildable it hides config that should be visible in the manifest. Use it to
+# experiment with `spangap menuconfig` / save-defconfig, then promote the lines
+# you want to keep into `kconfig:`.
+sdkconfig.defaults
+sdkconfig.defaults.*
 partitions.csv
 web-interface/node_modules/
 web-interface/dist/
@@ -43,6 +53,8 @@ esp-idf/managed_components/
 esp-idf/dependencies.lock
 esp-idf/sdkconfig
 esp-idf/sdkconfig.old
+esp-idf/sdkconfig.defaults
+esp-idf/sdkconfig.defaults.*
 __pycache__/
 *.pyc
 *.pyo

@@ -38,7 +38,7 @@ hw-tdeck/
 │       │                  ephemeral gps.* publish, standby on disable)
 │       ├── ports.h        ITS port constants (the few that are app-side)
 │       ├── ota_pubkey.h   the OTA verification key for this app (public)
-│       └── esp_idf_hal.h  pin-defs include path consumed by tr-lora
+│       └── esp_idf_hal.h  pin-defs include path consumed by iface-lora
 ├── partitions.csv         the app's partition layout (overrides platform default)
 ├── web-interface/         Quasar SPA shell — only the reticulous app shell
 │   ├── package.json       depends on spangap-browser (symlinked locally)
@@ -66,10 +66,10 @@ Every protocol piece is its own straddle:
 | Concern         | Straddle                                         |
 | --------------- | ------------------------------------------------ |
 | RNS core        | [rns](../rns)            |
-| TCP transport   | [tr-tcp](../tr-tcp)              |
-| AutoInterface   | [tr-auto](../tr-auto)            |
-| ESP-NOW         | [tr-espnow](../tr-espnow)        |
-| LoRa            | [tr-lora](../tr-lora)            |
+| TCP transport   | [iface-tcp](../iface-tcp)              |
+| AutoInterface   | [iface-auto](../iface-auto)            |
+| ESP-NOW         | [iface-espnow](../iface-espnow)        |
+| LoRa            | [iface-lora](../iface-lora)            |
 | LXMF messaging  | [lxmf](../lxmf)            |
 | Nomad pages     | [nomad](../nomad)          |
 | Offline maps    | [maps](../maps)                                  |
@@ -119,8 +119,10 @@ map in [`docs/tdeck.md §1.2`](docs/tdeck.md).
   and trackball: all driven by spangap-lcd's LVGL UI
   (`CONFIG_SPANGAP_LCD`), fully interrupt-driven.
 
-The Heltec WiFi LoRa 32 V3 was evaluated and rejected — no PSRAM, and
-the spangap platform requires octal PSRAM.
+The Heltec WiFi LoRa 32 V3 was evaluated and rejected — it has no PSRAM,
+and the spangap platform requires PSRAM. (The later V4, with 2 MB *quad*
+PSRAM, is supported — see the `hw-heltecv4` board straddle. The T-Deck uses
+octal PSRAM, but octal is the board's choice, not a platform requirement.)
 
 ## Read next
 

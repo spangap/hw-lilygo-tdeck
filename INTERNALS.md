@@ -42,7 +42,7 @@ All T-Deck Plus board support lives here:
 - The board's bespoke-peripheral `BOARD_*` constants (input + GNSS pins).
   No board-select Kconfig — hw-tdeck is the T-Deck. The display pins live in
   the lcd component's `CONFIG_LCD_*` (sdkconfig.defaults); the LoRa pins in
-  tr-lora's `CONFIG_LORA*`.
+  iface-lora's `CONFIG_LORA*`.
 - Power / CS routing.
 - `CONFIG_SPANGAP_LCD`-gated: the touch/trackball/button input HAL
   and the QWERTY keyboard. The keyboard owns its own I²C / indev /
@@ -52,7 +52,7 @@ All T-Deck Plus board support lives here:
 - The two-phase API:
   `void tdeckPreInit(void);` and `void tdeckPostInit(void);`.
 
-The `BOARD_*` pin map is also consumed by `tr-lora` (via its
+The `BOARD_*` pin map is also consumed by `iface-lora` (via its
 PRIVATE include path that picks up `${CMAKE_SOURCE_DIR}/main`) and by
 `main.cpp` itself.
 
@@ -146,11 +146,11 @@ the index that used to be in CLAUDE.md is:
 - **rnsd** — [docs/rnsd.md](docs/rnsd.md) (this app) +
   [rns](../rns).
 - **tcp** — [docs/tcp.md](docs/tcp.md) +
-  [tr-tcp](../tr-tcp).
+  [iface-tcp](../iface-tcp).
 - **auto** — [docs/auto.md](docs/auto.md) +
-  [tr-auto](../tr-auto).
+  [iface-auto](../iface-auto).
 - **lora** — [docs/lora.md](docs/lora.md) +
-  [tr-lora](../tr-lora).
+  [iface-lora](../iface-lora).
 - **lxmf** — [docs/lxmf.md](docs/lxmf.md) (black box),
   [docs/internals/lxmf.md](docs/internals/lxmf.md) (reach inside) +
   [lxmf](../lxmf).

@@ -6,61 +6,24 @@
 # Spangap — immutable project identity (s.sys.project; mismatch triggers
 # factory reset of /state) and user-visible banner (s.sys.banner default).
 CONFIG_SPANGAP_PROJECT_NAME="reticulous"
-CONFIG_SPANGAP_BANNER="reticulous"
+CONFIG_SPANGAP_BANNER=""
 
 # T-Deck Plus — 16 MB flash, 8 MB octal PSRAM (ESP32-S3FN16R8)
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 CONFIG_SPIRAM_MODE_OCT=y
 
-# T-Deck Plus — SD card via shared FSPI bus, owned by spangap.
-# Pins shared with LoRa (SX1262) + LCD; spangap's spi_helper arbitrates
-# the bus and IDF's per-device mutex serialises transactions.
-CONFIG_SPANGAP_SDCARD=y
-CONFIG_SPANGAP_SDCARD_BUS_SPI=y
-CONFIG_SPANGAP_SDCARD_SPI_HOST=2
-CONFIG_SPANGAP_SDCARD_SPI_PIN_CS=39
-CONFIG_SPANGAP_SDCARD_SPI_PIN_SCK=40
-CONFIG_SPANGAP_SDCARD_SPI_PIN_MOSI=41
-CONFIG_SPANGAP_SDCARD_SPI_PIN_MISO=38
+# T-Deck Plus board peripheral pin maps (SD card + LoRa) now live in this
+# straddle's straddle.yaml `kconfig:` block — the per-straddle channel that
+# feeds board VALUES into the schema the spangap SD driver / tr-lora DEFINE.
+# Keeping them in the manifest makes "what this board wires" visible next to
+# its requires/init, and survives demoting hw-tdeck from buildable to a plain
+# `--include`d board straddle (a non-buildable straddle's sdkconfig.defaults
+# would be ignored; its `kconfig:` is collected regardless).
 
-# T-Deck Plus — one SX1262 LoRa modem on the shared FSPI bus (host/SCK/MOSI/
-# MISO match the SD + display block above). Radio pins + type come from
-# tr-lora's Kconfig; only CS/DIO1/BUSY/RST differ per radio. TCXO is 1.8 V
-# and the SX1262 drives DIO2 as its own antenna switch.
-CONFIG_LORA_COUNT=1
-CONFIG_LORA_SPI_HOST=2
-CONFIG_LORA_SCK_PIN=40
-CONFIG_LORA_MOSI_PIN=41
-CONFIG_LORA_MISO_PIN=38
-CONFIG_LORA0_CS_PIN=9
-CONFIG_LORA0_DIO1_PIN=45
-CONFIG_LORA0_BUSY_PIN=13
-CONFIG_LORA0_RST_PIN=17
-CONFIG_LORA0_TCXO_MV=1800
-CONFIG_LORA0_DIO2_RF_SWITCH=y
-CONFIG_LORA0_RADIO_SX1262=y
-
-# microReticulum uses C++ exceptions extensively (every error path in
-# Identity, Packet, Cryptography, Persistence raises std::invalid_argument
-# or std::runtime_error). The spangap default disables them for code-size
-# reasons; we re-enable here. Cost: ~30 KB binary, plus libstdc++ unwinder
-# tables.
-CONFIG_COMPILER_CXX_EXCEPTIONS=y
-CONFIG_COMPILER_CXX_EXCEPTIONS_EMG_POOL_SIZE=0
-
-# mbedTLS HKDF — used by µR's Cryptography/HKDF.cpp (key derivation for
-# Fernet, IFAC, Identity prove/verify). Off by default in IDF.
-CONFIG_MBEDTLS_HKDF_C=y
-
-# IPC task stack — IDF default is 1280 bytes, which is enough for the bare
-# IPC service but not for cross-core init callbacks (the LittleFS/littlefs
-# init path that runs on ipc0 during spangap_init has been seen to overflow
-# 1280 bytes). 4 KiB gives comfortable headroom.
-CONFIG_ESP_IPC_TASK_STACK_SIZE=4096
-
-# Bump idle task stack — SMP idle runs deferred-free hooks, can overflow
-# the 1536-byte default.
-CONFIG_FREERTOS_IDLE_TASK_STACKSIZE=2048
+# NOTE: µReticulum's build needs (C++ exceptions, mbedTLS HKDF) now live in the
+# rns straddle's `kconfig:` block; platform-generic tuning (IPC/idle stacks,
+# IPv6 SLAAC) lives in spangap-core's sdkconfig.defaults.spangap. Only genuine
+# T-Deck hardware remains in this file.
 
 # ── On-device LCD UI (spangap-lcd) ──────────────────────────────────────────
 # Drop the whole UI with `spangap build --no-lcd`; presence of the spangap-lcd
@@ -93,7 +56,3 @@ CONFIG_LV_USE_CLIB_MALLOC=y
 CONFIG_LV_USE_CLIB_STRING=y
 # Montserrat 12 for the compact 4×3 launcher tile labels (default font is 14).
 CONFIG_LV_FONT_MONTSERRAT_12=y
-
-# IPv6 SLAAC: form a global address from router RAs so the device can reach
-# v6-only hosts. Dial path is AF_UNSPEC.
-CONFIG_LWIP_IPV6_AUTOCONFIG=y

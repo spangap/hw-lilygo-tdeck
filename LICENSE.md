@@ -30,8 +30,8 @@ vendored third-party sub-components with their own licenses:
 | `spangap/wg` | trombik/esp_wireguard tree, NaCl curve25519 ref, poly1305-donna, x25519 by Cryptography Research, RFC 7693 blake2s | BSD-3-Clause / public domain / MIT |
 | `spangap/acme`, `duckdns`, `ota`, `upnp` | none | — |
 | `reticulous/rns` | microReticulum fork, microStore, ed25519-donna, x25519 (Mike Hamburg), bzip2 | Apache-2.0 / public domain / MIT / bzip2 license |
-| `reticulous/tr-tcp`, `-auto`, `-espnow`, `-lxmf`, `-nomad`, `maps` | none | — |
-| `reticulous/tr-lora` | RadioLib (pulled as managed dep, not vendored) | MIT |
+| `reticulous/iface-tcp`, `-auto`, `-espnow`, `-lxmf`, `-nomad`, `maps` | none | — |
+| `reticulous/iface-lora` | RadioLib (pulled as managed dep, not vendored) | MIT |
 
 ### Firmware build-time dependencies
 
@@ -42,7 +42,7 @@ third-party managed dep used by any of the straddles it requires:
 | Component | Source | License |
 |---|---|---|
 | ESP-IDF v5.5.4 (platform) | espressif/esp-idf | Apache-2.0 |
-| `jgromes/radiolib` v7 (for tr-lora) | components.espressif.com / GitHub | **MIT** |
+| `jgromes/radiolib` v7 (for iface-lora) | components.espressif.com / GitHub | **MIT** |
 | `lvgl/lvgl` v9 (for spangap-lcd) | components.espressif.com / lvgl | **MIT** |
 | `espressif/esp_lcd_touch_gt911` (pulls `esp_lcd_touch`) | components.espressif.com | Apache-2.0 |
 | `espressif/esp_jpeg` (TJpgDec-based, for maps) | components.espressif.com | Apache-2.0 |
