@@ -1,0 +1,16 @@
+description: "hw-tdeck: LilyGo T-Deck Plus board HAL for reticulous (power/CS/reset, ST7789 display + GT911 touch + trackball + QWERTY input HAL, GNSS, RTC)."
+url: https://github.com/reticulous/hw-tdeck
+version: "0.1.0"
+license: "Apache-2.0"
+targets:
+  - esp32s3
+dependencies:
+  idf:
+    version: ">=5.5"
+  # GT911 capacitive touch — used by the on-device-UI input HAL in
+  # conditional/spangap-lcd/. This entry is inert at build time (the manager
+  # doesn't recurse into locally-staged components); the buildable
+  # reticulous/reticulous surfaces it so it's actually fetched. Kept here for
+  # locality / standalone reference.
+  espressif/esp_lcd_touch_gt911:
+    version: "^1.1"
