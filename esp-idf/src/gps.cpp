@@ -813,7 +813,7 @@ static void gpsTaskMain(void*) {
 
 void gpsInit(void) {
     if (storageGetInt("s.gps.version", 0) < GPS_VERSION) {
-        storageDefault("s.gps.enable", 0);
+        storageDefault("s.gps.enable", 1);   /* T-Deck has the GPS hardware → on by default; user owns it after */
         storageDefault("s.gps.interval", 1);   /* seconds */
         storageDefault("s.gps.ignore_clock", 0);   /* 1 = don't set the system clock from GPS */
         storageSet("s.gps.version", GPS_VERSION);

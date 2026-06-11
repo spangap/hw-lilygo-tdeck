@@ -31,6 +31,7 @@
 #include "esp_lcd_panel_io.h"
 #include "esp_lcd_touch.h"
 #include "esp_lcd_touch_gt911.h"
+#include "esp_log.h"
 #include "lvgl.h"
 
 /* Forward declarations so the HAL ops table + cross-calls resolve regardless
@@ -75,6 +76,17 @@ static void tdeckTouchInit(void) {
      * probe both, as docs/tdeck.md advises. */
     const uint8_t addrs[] = { ESP_LCD_TOUCH_IO_I2C_GT911_ADDRESS,
                               ESP_LCD_TOUCH_IO_I2C_GT911_ADDRESS_BACKUP };
+
+    /* Probing the address the board did NOT latch makes esp_lcd_touch_gt911 and
+     * the i2c IO log a failed read at ERROR level before the real address
+     * answers — expected, not a fault. Mute those two tags across the probe,
+     * then put back the level they had (the global default, barring an explicit
+     * override). Our own warn() below still fires if BOTH addresses are silent. */
+    const esp_log_level_t prevGt = esp_log_level_get("GT911");
+    const esp_log_level_t prevIo = esp_log_level_get("lcd_panel.io.i2c");
+    esp_log_level_set("GT911",            ESP_LOG_NONE);
+    esp_log_level_set("lcd_panel.io.i2c", ESP_LOG_NONE);
+
     for (uint8_t addr : addrs) {
         esp_lcd_panel_io_handle_t tio = nullptr;
         /* Build the IO config by hand: the GT911 CONFIG macro uses out-of-order
@@ -90,6 +102,8 @@ static void tdeckTouchInit(void) {
 
         esp_lcd_touch_handle_t tp = nullptr;
         if (esp_lcd_touch_new_i2c_gt911(tio, &tcfg, &tp) == ESP_OK) {
+            esp_log_level_set("GT911",            prevGt);   /* restore once found */
+            esp_log_level_set("lcd_panel.io.i2c", prevIo);
             info("touch: GT911 ready @ 0x%02X\n", addr);
             char tch[20];
             snprintf(tch, sizeof(tch), "GT911 @ 0x%02X", addr);
@@ -106,6 +120,8 @@ static void tdeckTouchInit(void) {
         }
         esp_lcd_panel_io_del(tio);   /* free and try the other address */
     }
+    esp_log_level_set("GT911",            prevGt);   /* both addresses silent — restore + report */
+    esp_log_level_set("lcd_panel.io.i2c", prevIo);
     warn("touch: GT911 not found at 0x5D or 0x14\n");
     storageSet("tdeck.touch", "not found");
 }
