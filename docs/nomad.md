@@ -1,5 +1,16 @@
 # nomad — Nomad Network pages on spangap
 
+> **Key-shape update (2026-06-12):** browsing is now session-based —
+> 7 parallel browser contexts (0–5 web tabs, 6 LCD), each with its own
+> Link. `nomad.nav.*` / `nomad.page.*` below read as
+> `nomad.s<sid>.nav.*` / `nomad.s<sid>.page.*`, and cmd values carry a
+> `<sid>|` prefix. Bookmarks moved to opaque ids addressing host AND
+> path: `s.nomad.bookmarks.<id>` = `"<hash>[:<path>]|<name>|<note>"`
+> (no longer keyed by dest hash), and the SPA publish cap is now
+> compile-time `NOMAD_MAX_PAGE_PUBLISH` (128 KB), not
+> `s.nomad.max_page_publish`. See `nomad/INTERNALS.md` for the current
+> shape.
+
 > **Status — client implemented + hardware-verified (2026-05-25).** The
 > browser/client half of Nomad Network's *page/web* layer is live: the
 > `nomad` task, the SPA "Nomad Browser" window (TS Micron renderer), and
