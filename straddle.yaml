@@ -44,14 +44,10 @@ kconfig:
   # Board memory: 16 MB flash, 8 MB octal PSRAM (ESP32-S3FN16R8).
   - CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
   - CONFIG_SPIRAM_MODE_OCT=y
-  # PSRAM speed: override spangap-core's 80 MHz default down to 40 MHz on this
-  # board. Octal PSRAM @80 MHz (DDR) shares the MSPI with the 80 MHz flash and
-  # the boot-tuned timing point is marginal on the S3R8 — a flash read (e.g.
-  # `cat /state/crontab`) was handing the net task corrupted PSRAM bytes,
-  # surfacing as a LoadProhibited walking the cJSON config tree (cfgRoot lives
-  # in PSRAM). 40 MHz is SDR: large timing margin, no DDR re-tune fragility.
-  # Costs ~half PSRAM read bandwidth. TESTING whether this clears the crash.
-  - CONFIG_SPIRAM_SPEED_40M=y
+  # PSRAM runs at spangap-core's 80 MHz default. (Briefly tried 40 MHz chasing
+  # `cat`-during-flash crashes, but those were PSRAM-*placement* bugs — FreeRTOS
+  # control structures wrongly in PSRAM — not MSPI timing; see docs/memory.md.
+  # 40 MHz changed nothing and only halved read bandwidth, so reverted.)
   # SD card on the shared FSPI bus (pins shared with LoRa + LCD; spangap's
   # spi_helper arbitrates the bus).
   - CONFIG_SPANGAP_SDCARD=y
@@ -91,10 +87,12 @@ kconfig:
   - CONFIG_LCD_NATIVE_HEIGHT=320
   - CONFIG_LCD_ROTATION_90=y
   - CONFIG_LCD_INVERT_COLOR=y
-  # LVGL v9 tuning. 16-bit colour matches the panel; route LVGL allocations
-  # through the C heap so they land in PSRAM (we byte-swap RGB565 in the flush
-  # callback, so LV_COLOR_16_SWAP stays off). Montserrat 12 for launcher labels.
+  # LVGL v9 tuning. 16-bit colour matches the panel (we byte-swap RGB565 in the
+  # flush callback, so LV_COLOR_16_SWAP stays off). Montserrat 12 for launcher
+  # labels. LVGL allocations route through spangap's central policy (mem.h /
+  # gp_alloc → PSRAM on PSRAM targets, internal on no-PSRAM ones) via
+  # LV_USE_CUSTOM_MALLOC + lv_mem_spangap.cpp, instead of the C heap directly.
   - CONFIG_LV_COLOR_DEPTH_16=y
-  - CONFIG_LV_USE_CLIB_MALLOC=y
+  - CONFIG_LV_USE_CUSTOM_MALLOC=y
   - CONFIG_LV_USE_CLIB_STRING=y
   - CONFIG_LV_FONT_MONTSERRAT_12=y
