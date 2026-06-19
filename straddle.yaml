@@ -42,7 +42,10 @@ init:
 # describes this hardware MUST live here in kconfig: to survive `--with`.
 kconfig:
   # Board memory: 16 MB flash, 8 MB octal PSRAM (ESP32-S3FN16R8).
-  - CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+  # Flash size is intentionally NOT pinned: spangap ships a 4 MB floor image and
+  # the firmware self-grows to the real 16 MB at first boot (see statePartitionEnsure
+  # in fs.cpp), so one image is universal across flash sizes. Pin it back only to
+  # disable self-grow for this board.
   - CONFIG_SPIRAM_MODE_OCT=y
   # PSRAM runs at spangap-core's 80 MHz default. (Briefly tried 40 MHz chasing
   # `cat`-during-flash crashes, but those were PSRAM-*placement* bugs — FreeRTOS
