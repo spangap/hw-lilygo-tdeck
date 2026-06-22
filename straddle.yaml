@@ -35,6 +35,11 @@ start:
 init:
   - call: tdeckLcdInit
     when: spangap/spangap-lcd
+  # ES7210 mic control shim (esp-idf/conditional/audio/) — only emitted/linked
+  # when the spangap/audio engine is staged. Registers the I2C codec ops; the
+  # audio task applies them lazily on first capture.
+  - call: tdeckAudioInit
+    when: spangap/audio
   - call: gpsInit
 # Board VALUES, fed to the symbols other straddles / IDF DEFINE through the
 # collected staging/sdkconfig.spangap-fragments. A board straddle is non-
@@ -99,3 +104,22 @@ kconfig:
   - CONFIG_LV_USE_CUSTOM_MALLOC=y
   - CONFIG_LV_USE_CLIB_STRING=y
   - CONFIG_LV_FONT_MONTSERRAT_12=y
+  # Audio (consumed by spangap/audio when staged). ES7210 quad-mic ADC on I2S0
+  # (standard I2S, S3 as master), MAX98357A speaker on I2S1. The two pin sets are
+  # disjoint, so capture and playback run as true full-duplex on two independent
+  # I2S controllers. GPIO 21 is the ES7210 word-select only; the self-clocking
+  # MAX98357A has no MCLK input and never touches it, so nothing contends.
+  # (A board's sdkconfig.defaults is ignored — these MUST live in kconfig:.)
+  - CONFIG_AUDIO_OUT_ENABLE=y
+  - CONFIG_AUDIO_IN_ENABLE=y
+  - CONFIG_AUDIO_IN_MODE_STD=y
+  - CONFIG_AUDIO_OUT_I2S_PORT=1
+  - CONFIG_AUDIO_OUT_BCK_GPIO=7
+  - CONFIG_AUDIO_OUT_WS_GPIO=5
+  - CONFIG_AUDIO_OUT_DOUT_GPIO=6
+  - CONFIG_AUDIO_IN_I2S_PORT=0
+  - CONFIG_AUDIO_IN_MCLK_GPIO=48
+  - CONFIG_AUDIO_IN_SCK_GPIO=47
+  - CONFIG_AUDIO_IN_WS_GPIO=21
+  - CONFIG_AUDIO_IN_DIN_GPIO=14
+  - CONFIG_AUDIO_RATE_DEFAULT=16000
