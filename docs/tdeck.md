@@ -49,7 +49,11 @@ Under `CONFIG_SPANGAP_LCD` the board registers, as the `lcd` input HAL
 
 - **GT911 capacitive touch** (probed at 0x5D/0x14; interrupt-driven) → `touch_read`
 - **Trackball → mouse pointer** with velocity-dependent acceleration — the module
-  owns the whole pointing device (the curve *and* the settings)
+  owns the whole pointing device (the curve *and* the settings). Driving the
+  pointer **into a screen edge** while it's already pinned there pans the active
+  widget instead via `lcdScroll()` (the step px the clamp would swallow become the
+  scroll distance) — so a touchless deck reaches offscreen content and pages the
+  launcher. Skipped in trackball→arrows mode (the CLI/terminal claims the ball).
 - **Centre/Home button** (GPIO 0) → the pointer's click / hold-to-Home
 - **QWERTY keyboard** (ESP32-C3 @ I2C 0x55) — owned entirely here, *not* by `lcd`:
   its INT is dead and its read is destructive, so it runs its own poll task +

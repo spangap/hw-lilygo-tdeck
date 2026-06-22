@@ -317,7 +317,6 @@ static bool tdeckPointerRead(int* x, int* y) {
 
     int dx = (int)lroundf((float)dxp * step);
     int dy = (int)lroundf((float)dyp * step);
-    bool moved = (dx != 0 || dy != 0);
 
     /* Tuning aid (dbg-gated, rate-limited): read the live pulse rate to set
      * trackball_accel_min/max. Runs on the lcd task, so it logs under that tag. */
@@ -327,11 +326,25 @@ static bool tdeckPointerRead(int* x, int* y) {
         dbg("tball vel=%.0f/s accel=%.2f step=%.1f\n", (double)s_tbVel, (double)accel, (double)step);
     }
 
+    /* Edge-pan: when the cursor is already pinned against a screen edge and the
+     * trackball keeps pushing that way, the motion the clamp would otherwise
+     * swallow scrolls the active widget (or the launcher) instead — so a
+     * touchless board can reach offscreen content. The would-be step px become
+     * the scroll distance, so panning tracks the pointer's own (accelerated)
+     * speed. lcdScroll runs on the lcd task; pointer_read already does. */
+    if      (dx > 0 && s_ptrX >= scrW - 1) lcdScroll(LCD_SCROLL_RIGHT, dx);
+    else if (dx < 0 && s_ptrX <= 0)        lcdScroll(LCD_SCROLL_LEFT,  -dx);
+    if      (dy > 0 && s_ptrY >= scrH - 1) lcdScroll(LCD_SCROLL_DOWN,  dy);
+    else if (dy < 0 && s_ptrY <= 0)        lcdScroll(LCD_SCROLL_UP,    -dy);
+
+    /* `moved` is the real position change after clamping — false once pinned at
+     * an edge, so the cursor fades on its dwell timer while you keep panning. */
+    int ox = s_ptrX, oy = s_ptrY;
     s_ptrX = std::clamp(s_ptrX + dx, 0, scrW - 1);
     s_ptrY = std::clamp(s_ptrY + dy, 0, scrH - 1);
     *x = s_ptrX;
     *y = s_ptrY;
-    return moved;
+    return (s_ptrX != ox || s_ptrY != oy);
 }
 
 /* Built-in "T-Deck" Settings panel (root level): the trackball + display knobs
