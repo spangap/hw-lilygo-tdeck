@@ -359,7 +359,7 @@ static void tdeckSettingsPane(void* arg) {
     lcdSettingValue  (p, "Touch", "tdeck.touch");
     lcdSettingSection(p, "GPS");
     lcdSettingSwitch (p, "Enable",       "s.gps.enable");
-    lcdSettingSlider (p, "Interval (s)", "s.gps.interval", 1, 60);
+    lcdSettingSlider (p, "Interval (s)", "s.gps.interval", 0, 10);   /* 0 = continuous, 1-10 = PSM cyclic */
     lcdSettingValue  (p, "Status",       "gps.state");   /* "power-cycle to wake" etc. */
     lcdSettingSection(p, "Trackball");
     lcdSettingSlider (p, "Pointer speed",    "s.tdeck.trackball_speed",      4, 40);

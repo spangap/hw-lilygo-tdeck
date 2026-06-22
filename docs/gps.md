@@ -58,11 +58,20 @@ covered by the 1.5 s listen window).
 | Key | Default | Meaning |
 |---|---|---|
 | `s.gps.enable` | `0` | gate: 1 runs the task, 0 puts the chip in standby and tears down the UART |
-| `s.gps.interval` | `1` | seconds between published `gps.*` snapshots |
+| `s.gps.interval` | `5` | fix cadence: `0` = continuous tracking (full power, 1 Hz), `1`–`10` = PSM cyclic tracking (PSMCT) period in seconds |
 | `s.gps.ignore_clock` | `0` | 1 = never set the system clock from GPS |
 
-`s.gps.interval` only changes the publish cadence; the UART is still drained at
-≤1 Hz regardless so the RX buffer can't overflow.
+`s.gps.interval` drives the receiver's own update rate on the u-blox MIA-M10Q: it
+emits `UBX-CFG-VALSET` setting `CFG-RATE-MEAS` to the period and
+`CFG-PM-OPERATEMODE` to `FULL` (interval 0) or `PSMCT` (1–10). In PSMCT the chip
+low-power-tracks between fixes — roughly halving VCC draw at 1 Hz, less at longer
+periods — versus continuous tracking at 0. The Quectel L76K speaks no UBX PSM, so
+there the interval is only a publish throttle and the chip keeps running at 1 Hz.
+Either way the UART is still drained at ≤1 Hz so the RX buffer can't overflow, and
+the publish cadence follows the interval (continuous publishes every 1 s).
+
+Note: PSM doesn't cover BeiDou B1C and won't process SBAS — neither is enabled in
+the default constellation set, so this is only a constraint if that config changes.
 
 ## System clock from GPS
 
@@ -158,8 +167,8 @@ GPS is surfaced in the board's own **T-Deck** Settings pane
   the GT911 I²C probe (`GT911 @ 0x5D` or `not found`), published by
   `tdeckTouchInit`.
 - **GPS** section: `Enable` (→ `s.gps.enable`), `Interval (s)` slider
-  (→ `s.gps.interval`, 1–60), and `Status` (→ `gps.state`, where the
-  "power-cycle to wake" message appears).
+  (→ `s.gps.interval`, 0–10, where 0 = continuous and 1–10 = PSMCT period), and
+  `Status` (→ `gps.state`, where the "power-cycle to wake" message appears).
 
 ## Scope & possible extensions
 

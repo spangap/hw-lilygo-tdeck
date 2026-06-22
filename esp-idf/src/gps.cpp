@@ -24,10 +24,16 @@
  * u-blox; a power-cycled chip is simply fresh).
  *
  * Loop: itsPoll is the single wait point (config changes + a ≤1 s backstop).
- * The receiver free-runs at 1 Hz with no interrupt line wired (no PPS on the
- * Plus), so a 1 Hz drain cadence *is* the event cadence — on each wake we drain
- * the UART non-blocking, fold every sentence into a working fix, and once
- * s.gps.interval seconds have elapsed publish the whole snapshot to gps.*.
+ * No interrupt line is wired (no PPS on the Plus), so we drain on a ≤1 s cadence:
+ * on each wake we drain the UART non-blocking, fold every sentence into a working
+ * fix, and once the publish period has elapsed publish the whole snapshot to gps.*.
+ *
+ * s.gps.interval (0-10) sets the fix cadence. On the u-blox M10 it drives the
+ * receiver's own update rate: 0 = continuous tracking (full power, 1 Hz), 1-10 =
+ * PSM cyclic tracking (PSMCT) at that period in seconds — real power saving, the
+ * chip low-power-tracks between fixes (see gpsApplyRate). The L76K has no UBX PSM,
+ * so there it stays a pure publish throttle. The publish period follows interval
+ * (0 → 1 s, otherwise interval seconds).
  *
  * Time discipline (unless s.gps.ignore_clock is set — then the clock is left
  * entirely to ntp / manual set):
@@ -47,7 +53,7 @@
  *     a minute with no GPS coverage re-sync the system clock from it (logging
  *     the drift at debug) so the wall clock survives long fixless runs.
  *
- * Config:    s.gps.enable (0/1), s.gps.interval (seconds), s.gps.ignore_clock (0/1)
+ * Config:    s.gps.enable (0/1), s.gps.interval (0=continuous, 1-10 s PSMCT), s.gps.ignore_clock (0/1)
  * Ephemeral: gps.model gps.baud gps.state gps.fix gps.quality gps.lat gps.lon
  *            gps.alt gps.geoid gps.speed gps.course gps.sats_used gps.sats_view
  *            gps.hdop gps.vdop gps.pdop gps.snr gps.utc gps.fix_age
@@ -140,7 +146,7 @@ static volatile bool s_cfgDirty = true;
 static bool          s_enabled  = false;
 static bool          s_running  = false;   /* UART installed + listening */
 static int           s_baud     = 0;       /* last detected baud (kept across disable) */
-static int           s_interval = 1;       /* s.gps.interval, seconds */
+static int           s_interval = 5;       /* s.gps.interval: 0 = continuous, 1-10 = PSMCT period (s) */
 static bool          s_needsPowerCycle = false;  /* L76K put in FORCE-pin-only backup */
 
 static GpsFix        s_fix;
@@ -359,6 +365,38 @@ static void gpsStandby(void) {
         info("L76K deep backup (power-cycle to wake)");
     }
     uart_wait_tx_done(GPS_UART, pdMS_TO_TICKS(100));   /* flush before drop */
+}
+
+/* Tune the receiver's fix cadence to s_interval:
+ *   0      → continuous tracking (PSM off, full power), 1 Hz measurement rate
+ *   1..10  → PSM cyclic tracking (PSMCT) at that period in seconds — the chip
+ *            low-power-tracks between fixes (see docs/gps.md / M10 int. manual §3.6.2)
+ * Only the u-blox M10 understands the UBX configuration interface; the L76K has
+ * no UBX PSM, so for it s_interval stays a pure publish throttle and we send
+ * nothing here. Written to the RAM layer only — re-sent on every (re-)enable and
+ * on a live interval change, so it needn't survive a power cycle.
+ *
+ * One UBX-CFG-VALSET carries the key/value pairs in order; OPERATEMODE goes last
+ * because u-blox requires it set after the keys it depends on. Key IDs encode the
+ * value width (0x30…=U2/2 B, 0x20…=E1/1 B); little-endian throughout. */
+static void gpsApplyRate(void) {
+    if (s_baud != 38400) return;          /* not a u-blox M10 — nothing to tune */
+
+    uint16_t measMs = (uint16_t)((s_interval == 0 ? 1 : s_interval) * 1000); /* RATE-MEAS, ms */
+    uint8_t  mode   = (s_interval == 0) ? 0x00 : 0x02;                       /* FULL : PSMCT */
+
+    const uint8_t pl[] = {
+        0x00,                   /* version */
+        0x01,                   /* layers: RAM */
+        0x00, 0x00,             /* reserved */
+        0x01, 0x00, 0x21, 0x30, (uint8_t)(measMs & 0xFF), (uint8_t)(measMs >> 8), /* CFG-RATE-MEAS  (U2, ms) */
+        0x02, 0x00, 0x21, 0x30, 0x01, 0x00,                                       /* CFG-RATE-NAV = 1 (U2) */
+        0x05, 0x00, 0xd0, 0x30, 0x00, 0x00,                                       /* CFG-PM-ONTIME = 0 (U2, enter POT asap) */
+        0x01, 0x00, 0xd0, 0x20, mode,                                             /* CFG-PM-OPERATEMODE (E1) — last */
+    };
+    ubxSend(0x06, 0x8a, pl, sizeof(pl));
+    if (s_interval == 0) info("rate: continuous tracking (1 Hz)");
+    else                 info("rate: PSMCT, %d s update period", s_interval);
 }
 
 /* Try each candidate baud; lock on the first that produces a checksum-valid,
@@ -650,12 +688,15 @@ static void publishModel(const char* state, const char* model, int baud) {
 /* ─────────────── config ─────────────── */
 
 static void applyConfig(void) {
+    int newInterval = storageGetInt("s.gps.interval", 5);
+    if (newInterval < 0)  newInterval = 0;     /* 0 = continuous */
+    if (newInterval > 10) newInterval = 10;    /* PSMCT tops out at 10 s */
+
     s_enabled     = storageGetInt("s.gps.enable", 0) != 0;
-    s_interval    = storageGetInt("s.gps.interval", 1);
-    if (s_interval < 1) s_interval = 1;
     s_ignoreClock = storageGetInt("s.gps.ignore_clock", 0) != 0;
 
     if (!s_enabled) {
+        s_interval = newInterval;
         if (s_running) {
             gpsStandby();              /* backup the chip before dropping the line */
             gpsUartUninstall();
@@ -667,7 +708,18 @@ static void applyConfig(void) {
         }
         return;
     }
-    if (s_running) return;   /* interval change only — nothing to re-open */
+    if (s_running) {
+        /* Already up: the only thing that can change here is the interval. Re-tune
+         * the receiver live (continuous ↔ PSMCT / new period) and re-arm publishing
+         * so the new cadence takes effect at once. */
+        if (newInterval != s_interval) {
+            s_interval = newInterval;
+            gpsApplyRate();
+            s_lastPublishUs = 0;
+        }
+        return;
+    }
+    s_interval = newInterval;
 
     if (s_needsPowerCycle) {
         /* An L76K we put into FORCE-pin-only backup can't be revived over the
@@ -688,6 +740,7 @@ static void applyConfig(void) {
     s_fix = GpsFix{};
     s_line.clear();
     s_lastPublishUs = 0;
+    gpsApplyRate();   /* tune the just-locked receiver to the configured cadence */
     publishModel("acquiring", modelForBaud(s_baud), s_baud);
     info("up: %s @ %d baud", modelForBaud(s_baud), s_baud);
 }
@@ -742,7 +795,9 @@ static void cliGps(const char* args) {
                                           : (s_enabled ? "not detected" : "off"));
     cliPrintf("model:    %s\n", s_running ? modelForBaud(s_baud) : "-");
     cliPrintf("baud:     %d\n", s_baud);
-    cliPrintf("interval: %d s\n", s_interval);
+    if (s_interval == 0) cliPrintf("interval: 0 (continuous)\n");
+    else                 cliPrintf("interval: %d s%s\n", s_interval,
+                                   s_baud == 38400 ? " (PSMCT)" : "");
     if (s_fix.hasPos)
         cliPrintf("pos:      %.6f, %.6f  alt %.1f m\n",
                   s_fix.lat, s_fix.lon, s_fix.altMsl);
@@ -757,6 +812,11 @@ static void cliGps(const char* args) {
 }
 
 /* ─────────────── task ─────────────── */
+
+/* Seconds between gps.* publishes. Tracks the configured interval, except a
+ * continuous receiver (interval 0, fixing at 1 Hz) publishes every second rather
+ * than spamming every drain. */
+static int publishPeriodS(void) { return s_interval == 0 ? 1 : s_interval; }
 
 static void gpsTaskMain(void*) {
     info("task up (%s)", BOARD_NAME);
@@ -775,7 +835,7 @@ static void gpsTaskMain(void*) {
             drainUart();
             int64_t now = esp_timer_get_time();
             if (s_lastPublishUs == 0 ||
-                now - s_lastPublishUs >= (int64_t)s_interval * 1000000) {
+                now - s_lastPublishUs >= (int64_t)publishPeriodS() * 1000000) {
                 publishFix();
                 s_lastPublishUs = now;
             }
@@ -796,7 +856,7 @@ static void gpsTaskMain(void*) {
         int waitMs = (int)((kHeartbeatUs - (esp_timer_get_time() - s_lastHeartbeatUs)) / 1000);
         if (waitMs < 0) waitMs = 0;
         if (s_running) {
-            int64_t toPub = (int64_t)s_interval * 1000000 -
+            int64_t toPub = (int64_t)publishPeriodS() * 1000000 -
                             (esp_timer_get_time() - s_lastPublishUs);
             int pubMs = (toPub <= 0) ? 0 : (int)(toPub / 1000);
             if (pubMs > 1000) pubMs = 1000;
@@ -814,7 +874,7 @@ static void gpsTaskMain(void*) {
 void gpsInit(void) {
     if (storageGetInt("s.gps.version", 0) < GPS_VERSION) {
         storageDefault("s.gps.enable", 1);   /* T-Deck has the GPS hardware → on by default; user owns it after */
-        storageDefault("s.gps.interval", 1);   /* seconds */
+        storageDefault("s.gps.interval", 5);   /* 0 = continuous tracking, 1-10 = PSMCT period (s) */
         storageDefault("s.gps.ignore_clock", 0);   /* 1 = don't set the system clock from GPS */
         storageSet("s.gps.version", GPS_VERSION);
     }
