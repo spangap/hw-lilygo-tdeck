@@ -264,11 +264,14 @@ s.lxmf.id.<n>.default_method  per-identity send method: auto|opp|direct (default
 - **`sent` is not `delivered`.** Opportunistic messages get no network
   ack — `sent` means "handed to a transport." Only a proven
   DIRECT/Resource transfer reaches `delivered`.
-- **Stamps, tickets, spam-gating, and propagation are not enforced
-  yet.** Strangers are not currently challenged for proof-of-work, and
-  there is no propagation-node (store-and-forward) support — both are
-  planned. Multi-identity exists at the schema level but there is no
-  multi-identity UX yet.
+- **Proof-of-work stamps are implemented; tickets and propagation are
+  not.** We advertise a stamp cost (`s.lxmf.stamp_cost`, 0–18 slider,
+  default 16), pay a peer's advertised cost when sending
+  (`s.lxmf.generate_stamps`, default on), and optionally drop unstamped
+  inbound (`s.lxmf.enforce_stamps`, default off). Tickets (the
+  contact-exemption shortcut) and propagation-node (store-and-forward)
+  support are still planned. Multi-identity exists at the schema level
+  but there is no multi-identity UX yet.
 
 For protocol details, the upstream LXMF reference, the wire format, and
 the internal architecture, see [docs/internals/lxmf.md](internals/lxmf.md).

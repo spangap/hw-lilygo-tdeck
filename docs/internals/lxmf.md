@@ -53,8 +53,9 @@ Recurring failures, all sidestepped by the storage-SoT model: no
 multi-device/multi-frontend sync (a propagation node delivers a stored
 message to *one* requesting client and forgets it); ad-hoc opaque
 storage with no portable on-disk format; fragile non-negotiated
-attachments; invisible propagation reliability; missing stamp/ticket
-UX; `FIELD_THREAD` exists but nobody renders threads; blocking I/O on
+attachments; invisible propagation reliability; missing ticket UX
+(stamps now have a cost slider + generate/enforce toggles);
+`FIELD_THREAD` exists but nobody renders threads; blocking I/O on
 the UI path; no search; crude offline-queue UX; no native iOS.
 
 ## A.2 Wire format
@@ -597,8 +598,10 @@ to; rationale in
 
 ```
 s.lxmf.id.<n>.enabled         ✓ per-identity participation (default 1; 0 = dark)
-s.lxmf.enforce_stamps           strict-mode global default (Phase 4b)
-s.lxmf.auto_ticket              auto-issue tickets to contacts (Phase 4b)
+s.lxmf.stamp_cost             ✓ advertised PoW cost, single global (default 16; 0–18, 0 = none)
+s.lxmf.generate_stamps        ✓ pay a peer's advertised stamp cost when sending (default 1)
+s.lxmf.enforce_stamps         ✓ drop inbound without a valid stamp for our cost (default 0)
+s.lxmf.auto_ticket              auto-issue tickets to contacts (not implemented)
 s.lxmf.version                ✓ LXMF_VERSION = 1
 s.lxmf.announce_interval_s    ✓ periodic re-announce s (default 1800)
 s.lxmf.max_announces          ✓ announce-catalogue cap (default 2048)
@@ -610,8 +613,7 @@ s.lxmf.debug.only_local       ✓ quiet announce dbg
 ### Per-identity persistent (`s.lxmf.id.<n>.*`)
 
 ```
-label ✓ · enabled ✓ · display_name ✓ · stamp_cost (4b) ·
-enforce_stamps/auto_ticket overrides (4b) · default_method ✓ ·
+label ✓ · enabled ✓ · display_name ✓ · default_method ✓ ·
 privkey_ref (default secrets.lxmf.id.<n>.privkey) ·
 propagation.{node,sync_interval_s} (Phase 6)
 

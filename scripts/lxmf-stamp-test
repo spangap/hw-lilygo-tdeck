@@ -1,0 +1,183 @@
+#!/usr/bin/env python3
+"""lxmf-stamp-test — reference LXMF node for proof-of-work stamp interop.
+
+Stands up a real LXMF node (needs `rns` + `lxmf` in the active venv) and
+either echoes inbound messages or sends a one-shot, printing stamp
+validity for everything it receives. Used to confirm the firmware's
+stamp generation/validation is wire-compatible with upstream LXMF.
+
+Unlike lxmf-echo/lxmf-send (which join the dev-loop rnsd shared
+instance), this node dials the public Reticulum testnet directly, so it
+works against a device that is itself on the testnet — no bridge needed.
+A throwaway configdir + interface config is written under --configdir if
+absent; override the gateway with --peer host:port (repeatable).
+
+Examples:
+    # Receiver advertising a cost (device pays this when sending to us):
+    lxmf-stamp-test --mode echo --stamp-cost 8
+
+    # Sender paying the device's advertised cost (auto-detected):
+    lxmf-stamp-test --mode send --to <device_lxmf_hash> --content hi
+
+    # Sender forcing an under-cost stamp (device with enforce_stamps
+    # drops it):
+    lxmf-stamp-test --mode send --to <hash> --force-stamp 4
+
+Device side: `set s.lxmf.enforce_stamps=1` to exercise verification;
+`set s.lxmf.generate_stamps=0` to disable outbound stamping.
+"""
+import argparse
+import os
+import sys
+import threading
+import time
+from pathlib import Path
+
+import RNS
+import LXMF
+
+DEFAULT_PEERS = [("rns.radical.computer", 4242), ("193.26.158.230", 4965)]
+
+
+def _s(x):
+    return x.decode("utf-8", errors="replace") if isinstance(x, bytes) else (x or "")
+
+
+def ensure_config(configdir: Path, peers):
+    configdir.mkdir(parents=True, exist_ok=True)
+    cfg = configdir / "config"
+    if cfg.exists():
+        return
+    ifaces = ""
+    for i, (host, port) in enumerate(peers):
+        ifaces += (f"  [[testnet {i}]]\n"
+                   f"    type = TCPClientInterface\n"
+                   f"    enabled = Yes\n"
+                   f"    target_host = {host}\n"
+                   f"    target_port = {port}\n")
+    cfg.write_text(
+        "[reticulum]\n  enable_transport = No\n  share_instance = No\n\n"
+        "[logging]\n  loglevel = 4\n\n"
+        f"[interfaces]\n{ifaces}")
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--mode", choices=["echo", "send"], default="echo")
+    ap.add_argument("--configdir", default="/tmp/lxmf-stamp-test")
+    ap.add_argument("--peer", action="append", default=[],
+                    help="testnet gateway host:port (repeatable; "
+                         "defaults to known public gateways)")
+    ap.add_argument("--display-name", default="stamp-test")
+    ap.add_argument("--stamp-cost", type=int, default=None,
+                    help="advertise this inbound stamp cost (echo mode)")
+    ap.add_argument("--enforce", action="store_true",
+                    help="require valid inbound stamps (echo mode)")
+    ap.add_argument("--echo", action="store_true", help="reply to inbound")
+    ap.add_argument("--to", help="recipient lxmf hash hex (send mode)")
+    ap.add_argument("--content", default="hello from stamp-test")
+    ap.add_argument("--title", default="stamp-test")
+    ap.add_argument("--force-stamp", type=int, default=None,
+                    help="force outbound stamp cost regardless of announce")
+    ap.add_argument("--announce-interval", type=float, default=20.0)
+    args = ap.parse_args()
+
+    peers = DEFAULT_PEERS
+    if args.peer:
+        peers = [(p.rsplit(":", 1)[0], int(p.rsplit(":", 1)[1])) for p in args.peer]
+    configdir = Path(args.configdir)
+    ensure_config(configdir, peers)
+
+    RNS.Reticulum(configdir=str(configdir),
+                  loglevel=int(os.environ.get("RNS_LL", RNS.LOG_INFO)))
+    router = LXMF.LXMRouter(storagepath=str(configdir / "lxmf-store"))
+    identity = RNS.Identity()
+    local = router.register_delivery_identity(
+        identity, display_name=args.display_name, stamp_cost=args.stamp_cost)
+    if args.enforce:
+        router.enforce_stamps()
+    print(f"READY {local.hash.hex()} stamp_cost={args.stamp_cost} "
+          f"enforce={args.enforce}", flush=True)
+
+    def on_inbound(msg):
+        ts = time.strftime("%H:%M:%S")
+        src = msg.source_hash.hex() if msg.source_hash else "?"
+        print(f"[{ts}] INBOUND from={src} "
+              f"title={_s(getattr(msg, 'title', b'')).strip()!r} "
+              f"content={_s(getattr(msg, 'content', b'')).strip()!r} "
+              f"has_stamp={getattr(msg, 'stamp', None) is not None} "
+              f"stamp_valid={getattr(msg, 'stamp_valid', 'n/a')} "
+              f"stamp_value={getattr(msg, 'stamp_value', None)}", flush=True)
+        if args.echo:
+            try:
+                ident = RNS.Identity.recall(msg.source_hash)
+                dest = RNS.Destination(ident, RNS.Destination.OUT,
+                                       RNS.Destination.SINGLE, "lxmf", "delivery")
+                router.handle_outbound(LXMF.LXMessage(
+                    dest, local, f"echo: {_s(msg.content)}", title="echo",
+                    desired_method=LXMF.LXMessage.DIRECT))
+                print(f"[{ts}] echoed to {src}", flush=True)
+            except Exception as e:
+                print(f"[{ts}] echo failed: {e!r}", flush=True)
+
+    router.register_delivery_callback(on_inbound)
+
+    if args.mode == "send":
+        if not args.to:
+            print("FAILED --to required in send mode", flush=True)
+            return 2
+        dest_hash = bytes.fromhex(args.to)
+        if not RNS.Transport.has_path(dest_hash):
+            RNS.Transport.request_path(dest_hash)
+            dl = time.time() + 30
+            while not RNS.Transport.has_path(dest_hash) and time.time() < dl:
+                time.sleep(0.5)
+        ident = RNS.Identity.recall(dest_hash)
+        if ident is None:
+            print("FAILED no path/identity for dest", flush=True)
+            return 1
+        dest = RNS.Destination(ident, RNS.Destination.OUT,
+                               RNS.Destination.SINGLE, "lxmf", "delivery")
+        print(f"dest advertised stamp_cost(seen by us)="
+              f"{router.get_outbound_stamp_cost(dest_hash)} "
+              f"force={args.force_stamp}", flush=True)
+        msg = LXMF.LXMessage(dest, local, args.content, title=args.title,
+                             desired_method=LXMF.LXMessage.DIRECT,
+                             stamp_cost=args.force_stamp)
+        done = {"v": False}
+        msg.register_delivery_callback(
+            lambda m: (print("DELIVERED", flush=True), done.update(v=True)))
+        msg.register_failed_callback(
+            lambda m: (print("FAILED transfer", flush=True), done.update(v=True)))
+        router.handle_outbound(msg)
+        names = {LXMF.LXMessage.GENERATING: "GENERATING",
+                 LXMF.LXMessage.OUTBOUND: "OUTBOUND",
+                 LXMF.LXMessage.SENDING: "SENDING", LXMF.LXMessage.SENT: "SENT",
+                 LXMF.LXMessage.DELIVERED: "DELIVERED",
+                 LXMF.LXMessage.FAILED: "FAILED"}
+        dl, last = time.time() + 90, None
+        while time.time() < dl and not done["v"]:
+            s = names.get(msg.state, str(msg.state))
+            if s != last:
+                print(f"state={s}", flush=True)
+                last = s
+            time.sleep(0.5)
+        if not done["v"]:
+            print(f"TIMEOUT last={names.get(msg.state, msg.state)}", flush=True)
+        time.sleep(3)
+        return 0
+
+    def announce_loop():
+        while True:
+            try:
+                local.announce()
+            except Exception as e:
+                print(f"announce failed: {e!r}", flush=True)
+            time.sleep(args.announce_interval)
+    threading.Thread(target=announce_loop, daemon=True).start()
+    while True:
+        time.sleep(60)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
