@@ -22,6 +22,7 @@ idf_component_register(
     REQUIRES
         ${SPANGAP_REQUIRES}
         driver
+        esp_adc          # battery voltage ADC on GPIO 4 (tdeck task)
         esp_timer
         esp_event
         esp_netif

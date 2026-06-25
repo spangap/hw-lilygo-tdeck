@@ -41,10 +41,14 @@ static bool tdeckTouchRead(lcd_raw_pt_t* pts, int max, int* count);
 static bool tdeckClickRead(void);
 static void tdeckTrackballInit(void);
 static bool tdeckPointerRead(int* x, int* y);
+static void tdeckStandby(bool on);
 
 /* GT911 handle, created in tdeckInputInit(); null if the controller didn't
  * answer (then tdeckTouchRead reports no touches and the indev never fires). */
 static esp_lcd_touch_handle_t s_touch = nullptr;
+/* True while in standby: the GT911 reads are gated off (only the centre button is
+ * left live to wake the device). Set by tdeckStandby on the lcd task. */
+static bool                   s_touchAsleep = false;
 
 static void tdeckTouchInit(void) {
     i2c_master_bus_handle_t i2c = tdeckI2cBus();
@@ -131,7 +135,7 @@ static void tdeckTouchInit(void) {
  * is up. */
 static bool tdeckTouchRead(lcd_raw_pt_t* pts, int max, int* count) {
     *count = 0;
-    if (!s_touch) return false;
+    if (!s_touch || s_touchAsleep) return false;
     esp_lcd_touch_point_data_t pt[5] = {};
     uint8_t cnt = 0;
     esp_lcd_touch_read_data(s_touch);
@@ -142,13 +146,26 @@ static bool tdeckTouchRead(lcd_raw_pt_t* pts, int max, int* count) {
     return true;
 }
 
-/* ---- centre / Home button (GPIO 0) ----
+/* ---- centre / Home button (GPIO 0): click, launcher, standby ----
  * GPIO 0 is the BOOT-strap pin, also the trackball centre-press (shared with the
  * mic, which reticulous never uses). Pulled-up active-low. The board owns the
- * click-vs-hold policy: tdeckClickRead() asserts a click on a short press, while
- * a >=300ms hold goes Home via lcdGoHome() — the lcd component applies no timing. */
-static lv_timer_t* s_holdTimer = nullptr;
-static bool        s_btnLong   = false;   /* hold fired → suppress the release click */
+ * timing and the four meanings of the press:
+ *   - tap (< launcher_hold)                 -> a pointer click (lcd turns it into one)
+ *   - hold launcher_hold ms                 -> back to the launcher (lcdGoHome)
+ *   - hold launcher_hold + standby_hold ms  -> standby (set sys.standby)
+ *   - any press while in standby            -> wake (clear sys.standby), absorbed
+ * The two holds stack: a long hold goes Home first, then on to standby. When the
+ * press starts already at the launcher the launcher tier is dead, so standby comes
+ * at the shorter launcher_hold instead. The lcd component applies no timing of its
+ * own. Thresholds are s.tdeck.*_hold_ms (live). */
+static lv_timer_t*    s_homeTimer    = nullptr;   /* fires at launcher_hold -> lcdGoHome */
+static lv_timer_t*    s_standbyTimer = nullptr;   /* fires at launcher_hold+standby_hold -> standby */
+static bool           s_btnHeld      = false;     /* a press is in progress */
+static bool           s_btnConsumed  = false;     /* a hold action fired -> release is not a click */
+static bool           s_wakeAbsorb   = false;     /* swallow the rest of a transition press until release */
+static volatile bool  s_standby      = false;     /* mirror of sys.standby (set on the lcd task) */
+static int            s_launcherMs   = 300;       /* s.tdeck.launcher_hold_ms */
+static int            s_standbyMs    = 1000;      /* s.tdeck.standby_hold_ms (added on top of launcher) */
 
 static void tdeckButtonInit(void) {
     gpio_config_t io = {};
@@ -159,37 +176,77 @@ static void tdeckButtonInit(void) {
     io.intr_type    = GPIO_INTR_ANYEDGE;   /* wake on both press and release */
     gpio_config(&io);
     /* lcdInputISR wakes the lcd task on each edge; tdeckClickRead() (event mode)
-     * runs the click-vs-hold state machine from there. */
+     * runs the click/hold state machine from there. */
     gpio_isr_handler_add((gpio_num_t)BOARD_HOME_BTN_PIN, lcdInputISR, nullptr);
 }
 
-/* One-shot hold deadline (lcd task, via lv_timer): a press still held at 300ms is
- * a "go Home", not a click. */
-static void btnHoldCb(lv_timer_t*) {
-    s_holdTimer = nullptr;   /* the one-shot self-deleted after this fire */
-    s_btnLong   = true;      /* tell the release edge not to make it a click */
+static void cancelHoldTimers(void) {
+    if (s_homeTimer)    { lv_timer_delete(s_homeTimer);    s_homeTimer = nullptr; }
+    if (s_standbyTimer) { lv_timer_delete(s_standbyTimer); s_standbyTimer = nullptr; }
+}
+
+/* Held to launcher_hold (lcd task, via lv_timer): go Home. The press may still be
+ * down and hold on toward standby. */
+static void btnHomeCb(lv_timer_t*) {
+    s_homeTimer   = nullptr;   /* the one-shot self-deleted after this fire */
+    s_btnConsumed = true;      /* release is no longer a click */
     lcdGoHome();
 }
 
-/* lcd_input.h click_read (lcd task): the click-vs-hold state machine. Arms a
- * 300ms one-shot on press; on release within that window asserts the click for
- * exactly one poll (the component forces the follow-up read that lands the
- * release → LVGL sees a click). A >=300ms hold fires Home and is not clicked. */
+/* Held on to launcher_hold + standby_hold: enter standby. Swallow the rest of this
+ * press so the still-down finger can't immediately wake it again. */
+static void btnStandbyCb(lv_timer_t*) {
+    s_standbyTimer = nullptr;
+    s_btnConsumed  = true;
+    s_btnHeld      = false;    /* this press is done as far as the state machine */
+    s_wakeAbsorb   = true;     /* ignore the held finger until it lifts */
+    storageSet("sys.standby", 1);
+}
+
+/* lcd_input.h click_read (lcd task): the click / hold / standby state machine. A
+ * short press asserts the click for exactly one poll (the component forces the
+ * follow-up read that lands the release → LVGL sees a click). */
 static bool tdeckClickRead(void) {
-    static enum { IDLE, HELD } phase = IDLE;
     bool down = gpio_get_level((gpio_num_t)BOARD_HOME_BTN_PIN) == 0;   /* active-low */
+
+    /* Swallow the remainder of a press that already caused a transition (woke us,
+     * or was held into standby) until the finger lifts. */
+    if (s_wakeAbsorb) {
+        if (!down) s_wakeAbsorb = false;
+        return false;
+    }
+    /* In standby the only live input is this button: a press just wakes (clears
+     * sys.standby) and is absorbed — never a click or a hold. */
+    if (s_standby) {
+        if (down) { storageSet("sys.standby", 0); s_wakeAbsorb = true; }
+        return false;
+    }
+
     if (down) {
-        if (phase == IDLE) {
-            phase = HELD;
-            s_btnLong = false;
-            s_holdTimer = lv_timer_create(btnHoldCb, 300, nullptr);
-            lv_timer_set_repeat_count(s_holdTimer, 1);   /* one-shot */
+        if (!s_btnHeld) {
+            s_btnHeld     = true;
+            s_btnConsumed = false;
+            uint32_t homeMs = s_launcherMs > 0 ? (uint32_t)s_launcherMs : 1;
+            if (lcdAtLauncher()) {
+                /* Already home: the launcher tier would be a no-op, so skip it and
+                 * go straight to standby at the shorter launcher_hold — a quick hold
+                 * from the launcher sleeps the device. */
+                s_standbyTimer = lv_timer_create(btnStandbyCb, homeMs, nullptr);
+                lv_timer_set_repeat_count(s_standbyTimer, 1);
+            } else {
+                uint32_t standbyMs = (uint32_t)(s_launcherMs + s_standbyMs);
+                if (standbyMs == 0) standbyMs = 1;
+                s_homeTimer = lv_timer_create(btnHomeCb, homeMs, nullptr);
+                lv_timer_set_repeat_count(s_homeTimer, 1);
+                s_standbyTimer = lv_timer_create(btnStandbyCb, standbyMs, nullptr);
+                lv_timer_set_repeat_count(s_standbyTimer, 1);
+            }
         }
         return false;                               /* never click while held */
     }
-    if (s_holdTimer) { lv_timer_delete(s_holdTimer); s_holdTimer = nullptr; }
-    bool click = (phase == HELD && !s_btnLong);     /* short press → click on release */
-    phase = IDLE;
+    cancelHoldTimers();
+    bool click = (s_btnHeld && !s_btnConsumed);     /* short press → click on release */
+    s_btnHeld = false;
     return click;
 }
 
@@ -267,6 +324,11 @@ static bool tdeckPointerRead(int* x, int* y) {
     portENTER_CRITICAL(&s_tbMux);
     for (int i = 0; i < TB_N; i++) { c[i] = (int)s_tbCount[i]; s_tbCount[i] = 0; }
     portEXIT_CRITICAL(&s_tbMux);
+
+    /* In standby the trackball is dead: the counts are drained (so they can't jump
+     * on wake) but the cursor doesn't move and nothing scrolls — only the centre
+     * button wakes us. */
+    if (s_standby) { *x = s_ptrX < 0 ? 0 : s_ptrX; *y = s_ptrY < 0 ? 0 : s_ptrY; return false; }
 
     /* Clamp to the actual (post-rotation) panel; the lcd component owns the size. */
     int scrW = 0, scrH = 0;
@@ -364,6 +426,9 @@ static void tdeckSettingsPane(void* arg) {
     lcdSettingSection(p, "Trackball");
     lcdSettingSlider (p, "Pointer speed",    "s.tdeck.trackball_speed",      4, 40);
     lcdSettingSlider (p, "Cursor dwell (s)", "s.tdeck.pointer_visible_time", 1, 30);
+    lcdSettingSection(p, "Centre button");
+    lcdSettingSlider (p, "Launcher hold (ms)", "s.tdeck.launcher_hold_ms", 0, 1000);   /* hold this long -> launcher */
+    lcdSettingSlider (p, "Standby hold (ms)",  "s.tdeck.standby_hold_ms",  0, 1000);   /* + this much more -> standby */
     lcdSettingSection(p, "Display");
     lcdSettingSlider (p, "Backlight",        "s.lcd.backlight",              0, 255);
     lcdSettingSlider (p, "Sleep after (s)",  "s.lcd.inactivity_timeout",     0, 120);
@@ -376,6 +441,17 @@ static void tdeckInputInit(void) {
     tdeckButtonInit();
     tdeckTrackballInit();
     tdeckTouchInit();
+
+    /* Centre-button hold tiers + standby. The button (and the lcd inactivity
+     * timeout) only set/clear the ephemeral sys.standby key; this subscription is
+     * what actually sleeps/wakes the device — display off via lcdScreenSleep/Wake,
+     * plus our own input (touch + keyboard scan) off. This init runs on the lcd
+     * task, so the subscription dispatches there and lcdScreenSleep/Wake are safe. */
+    storageDefault("s.tdeck.launcher_hold_ms", s_launcherMs);
+    NOW_AND_ON_CHANGE("s.tdeck.launcher_hold_ms", { s_launcherMs = atoi(val); });
+    storageDefault("s.tdeck.standby_hold_ms", s_standbyMs);
+    NOW_AND_ON_CHANGE("s.tdeck.standby_hold_ms", { s_standbyMs = atoi(val); });
+    storageSubscribeChanges("sys.standby", ON_CHANGE { tdeckStandby(atoi(val) != 0); });
 }
 
 /* Register this board's input HAL with the lcd component. Called from
@@ -524,9 +600,15 @@ void IRAM_ATTR kbIntIsr(void*) {
 void pollTask(void*) {
     bool active = false;
     for (;;) {
+        /* Parked in standby: stop scanning the I2C keyboard entirely (the centre
+         * button is the only thing left to wake the device). tdeckStandby unparks
+         * us with a notify. Park on a clean self-check, not a suspend, so we never
+         * stop mid-I2C-transaction holding the shared bus. */
+        if (s_standby) { ulTaskNotifyTake(pdTRUE, portMAX_DELAY); continue; }
         TickType_t wait = s_intSeen ? INT_WAIT : (active ? POLL_FAST : POLL_IDLE);
         ulTaskNotifyTake(pdTRUE, wait);    /* woken by the INT, or times out to poll */
         active = false;
+        if (s_standby) continue;           /* entered standby during the wait */
         /* Drain up to a queueful per wake — bounded so a wedged keyboard that
          * keeps returning a byte can't spin this task. */
         for (int i = 0; i < 16; i++) {
@@ -541,6 +623,25 @@ void pollTask(void*) {
 }
 
 }  // namespace
+
+/* sys.standby subscription target (lcd task). The lcd component only flips the
+ * key — on the inactivity timeout or our centre button; we decide what the device
+ * actually does: display off, GT911 reads gated, keyboard scan parked. Only the
+ * centre button is left live, and a press of it clears the key to wake us. */
+static void tdeckStandby(bool on) {
+    if (on == s_standby) return;
+    s_standby = on;
+    if (on) {
+        s_touchAsleep = true;                          /* GT911 reads return nothing */
+        lcdScreenSleep();                              /* display off, backlight to 0 */
+        info("standby\n");
+    } else {
+        s_touchAsleep = false;
+        if (s_pollTask) xTaskNotifyGive(s_pollTask);   /* unpark the keyboard scan */
+        lcdScreenWake();                               /* display on, backlight fade-in */
+        info("wake\n");
+    }
+}
 
 /* Bring up the keyboard. Called from tdeckInit() AFTER spangapInit() — it
  * needs the lcd task to exist so it can create + drive its indev via lcdRun(). */

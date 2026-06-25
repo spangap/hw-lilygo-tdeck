@@ -31,6 +31,13 @@
 #define BOARD_POWER_EN_PIN      10
 #define BOARD_POWER_EN_ACTIVE   1   /* 1 = active high, 0 = active low */
 
+/* Battery sense: VBAT through a 2:1 resistor divider (100k/100k) into GPIO 4
+ * (ADC1). The divider sits on raw VBAT *upstream* of BOARD_POWER_EN_PIN — it has
+ * no enable gate and conducts continuously (~21 uA @ 4.2 V) whenever a cell is
+ * connected; only the case slide switch cuts it. So the ADC pin always carries
+ * VBAT/2 and needs no power-up step. Read by the tdeck task (tdeck_lcd.cpp). */
+#define BOARD_BAT_ADC           4
+
 /* GT911 capacitive touch (optional sub-revision). Shares the on-board I2C bus
  * (keyboard is 0x55, touch 0x5D). No reset GPIO routed. */
 #define BOARD_TOUCH_I2C_SDA     18
@@ -40,8 +47,10 @@
 
 /* Home / centre button: GPIO 0 (the BOOT-strap pin, also the trackball
  * centre-press; shared with the mic, which reticulous never uses). Read as a
- * pulled-up active-low input after boot — tdeck.cpp makes a short press a click
- * and a >=300ms hold "go home" (lcdGoHome). */
+ * pulled-up active-low input after boot — tdeck_lcd.cpp gives it four meanings: a
+ * short press is a click, a launcher_hold-ms hold goes Home (lcdGoHome), holding on
+ * to launcher_hold+standby_hold ms enters standby, and a press while in standby
+ * wakes the device. Hold thresholds are s.tdeck.*_hold_ms. */
 #define BOARD_HOME_BTN_PIN      0
 
 /* BlackBerry-style optical trackball: four direction lines, each pulsing
@@ -86,6 +95,14 @@
  * #if is needed anywhere.
  */
 void tdeckStart(void);
+
+/**
+ * Battery monitor bring-up: configures the GPIO4 ADC, publishes an initial
+ * battery.millivolt / battery.percent, and arms a once-a-minute esp_timer to
+ * keep them fresh. init: band (needs storage up). No task of its own — the
+ * periodic timer callback does the sampling.
+ */
+void tdeckBatteryInit(void);
 
 /**
  * Shared I2C0 master bus (SDA=BOARD_TOUCH_I2C_SDA, SCL=BOARD_TOUCH_I2C_SCL).

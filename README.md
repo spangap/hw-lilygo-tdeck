@@ -117,7 +117,12 @@ map in [`docs/tdeck.md §1.2`](docs/tdeck.md).
 - WiFi/BT antenna: PCB-trace on the ESP32-S3 module.
 - Display + capacitive touch (GT911), QWERTY keyboard, centre button,
   and trackball: all driven by spangap-lcd's LVGL UI
-  (`CONFIG_SPANGAP_LCD`), fully interrupt-driven.
+  (`CONFIG_SPANGAP_LCD`), fully interrupt-driven. The centre button is a
+  click; held it goes to the launcher (`s.tdeck.launcher_hold_ms`), held
+  longer it enters standby (`+ s.tdeck.standby_hold_ms`); a press while in
+  standby wakes the board. Standby (also reached via the lcd inactivity
+  timeout, through the `sys.standby` key) turns off the display, GT911, and
+  keyboard scan — only the centre button stays live to wake.
 
 The Heltec WiFi LoRa 32 V3 was evaluated and rejected — it has no PSRAM,
 and the spangap platform requires PSRAM. (The later V4, with 2 MB *quad*

@@ -41,6 +41,9 @@ init:
   - call: tdeckAudioInit
     when: spangap/audio
   - call: gpsInit
+  # Battery ADC monitor (esp-idf/src/tdeck.cpp): arms a 1/min esp_timer that
+  # publishes battery.millivolt / battery.percent. Always on — no UI dependency.
+  - call: tdeckBatteryInit
 # Board VALUES, fed to the symbols other straddles / IDF DEFINE through the
 # collected staging/sdkconfig.spangap-fragments. A board straddle is non-
 # buildable, so its sdkconfig.defaults would be IGNORED — everything that

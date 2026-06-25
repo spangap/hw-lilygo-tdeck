@@ -14,11 +14,18 @@
  */
 #include "tdeck.h"
 #include "log.h"            /* warn (i2c bus init) */
+#include "storage.h"        /* battery.* ephemerals */
 
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
+#include "esp_adc/adc_oneshot.h"
+#include "esp_adc/adc_cali.h"
+#include "esp_adc/adc_cali_scheme.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+
+#include <cstdint>
 
 /* =========================================================================
  * 1. Peripheral power rail + shared-SPI CS park
@@ -122,6 +129,131 @@ i2c_master_bus_handle_t tdeckI2cBus(void) {
  *
  * Public API — the always-on board bring-up (see tdeck.h).
  * ========================================================================= */
+
+/* =========================================================================
+ * Battery monitor — VBAT via the GPIO4 divider (see BOARD_BAT_ADC in tdeck.h).
+ *
+ * Always compiled (no UI dependency): a once-a-minute esp_timer samples the ADC
+ * and publishes two ephemerals the rest of the system reacts to —
+ *   battery.millivolt  — true VBAT in mV (pin reading × divider)
+ *   battery.percent    — 0..100, via the measured discharge curve below
+ * spangap-lcd's status bar subscribes to battery.percent for its icon; spangap-
+ * core's `bat` CLI command prints both. No dedicated task — the periodic timer
+ * callback does the read on the esp_timer task.
+ * ========================================================================= */
+
+namespace {
+
+constexpr uint16_t BAT_MIN_MV    = 3040;           /* measured empty (3.04 V) */
+constexpr uint16_t BAT_MAX_MV    = 4260;           /* measured full  (4.26 V) */
+/* Divider ratio. The physical T-Deck divider is 100k/100k = 2.0 and the ADC is
+ * curve-fit calibrated, so the true 2.0 applies — not Meshtastic's 2.11, which
+ * compensates for an *uncalibrated* ADC. Trim NUM/DEN if a multimeter disagrees. */
+constexpr uint32_t BAT_DIV_NUM   = 2, BAT_DIV_DEN = 1;
+constexpr int      BAT_SAMPLES   = 16;             /* averaged per read — kills ADC jitter */
+constexpr int64_t  BAT_PERIOD_US = 60LL * 1000000; /* re-sample cadence: every minute */
+
+/* Battery voltage (scaled to 0..255 across [BAT_MIN_MV, BAT_MAX_MV]) at each
+ * percent, measured on a real cell. Index i -> percent (100 - i); the array is
+ * monotonic non-increasing, so the first entry <= our scaled reading gives the
+ * percent. Input jitter is smoothed by the per-read averaging + EMA below, so
+ * the raw curve's small edginess never reaches the published value. */
+const uint8_t s_scaledVoltage[100] = {
+    254, 242, 230, 227, 223, 219, 215, 213, 210, 207,
+    206, 202, 202, 200, 200, 199, 198, 198, 196, 196,
+    195, 195, 194, 192, 191, 188, 187, 185, 185, 185,
+    183, 182, 180, 179, 178, 175, 175, 174, 172, 171,
+    170, 169, 168, 166, 166, 165, 165, 164, 161, 161,
+    159, 158, 158, 157, 156, 155, 151, 148, 147, 145,
+    143, 142, 140, 140, 136, 132, 130, 130, 129, 126,
+    125, 124, 121, 120, 118, 116, 115, 114, 112, 112,
+    110, 110, 108, 106, 106, 104, 102, 101,  99,  97,
+     94,  90,  81,  80,  76,  73,  66,  52,  32,   7,
+};
+
+adc_oneshot_unit_handle_t s_adc      = nullptr;
+adc_cali_handle_t         s_adcCali  = nullptr;
+adc_unit_t                s_adcUnit  = ADC_UNIT_1;
+adc_channel_t             s_adcChan  = ADC_CHANNEL_3;   /* GPIO4; confirmed at init */
+bool                      s_adcReady = false;
+uint32_t                  s_mvEma    = 0;               /* smoothed VBAT, mV (0 = unset) */
+
+uint8_t batteryPercent(uint16_t mv) {
+    if (mv >= BAT_MAX_MV) return 100;
+    if (mv <= BAT_MIN_MV) return 0;
+    uint32_t scaled = (uint32_t)(mv - BAT_MIN_MV) * 256u / (BAT_MAX_MV - BAT_MIN_MV);
+    for (uint8_t i = 0; i < 100; i++)
+        if (s_scaledVoltage[i] <= scaled) return (uint8_t)(100 - i);
+    return 0;
+}
+
+/* Sample, smooth, publish. Runs on the esp_timer task (and once at init). */
+void batteryRead(void*) {
+    if (!s_adcReady) return;
+    int acc = 0, ok = 0;
+    for (int i = 0; i < BAT_SAMPLES; i++) {
+        int raw;
+        if (adc_oneshot_read(s_adc, s_adcChan, &raw) == ESP_OK) { acc += raw; ok++; }
+    }
+    if (!ok) return;
+    int raw = acc / ok;
+    int pinMv;
+    if (!(s_adcCali && adc_cali_raw_to_voltage(s_adcCali, raw, &pinMv) == ESP_OK))
+        pinMv = (int)((int64_t)raw * 3100 / 4095);      /* nominal 12-bit @ 12 dB */
+    uint32_t mv = (uint32_t)pinMv * BAT_DIV_NUM / BAT_DIV_DEN;
+    /* Light EMA across reads (~3-4 min at the 1/min cadence) so the icon and
+     * percent don't wobble on noise; first reading seeds it directly (no lag). */
+    s_mvEma = s_mvEma ? (s_mvEma * 3 + mv) / 4 : mv;
+    uint16_t outMv = (uint16_t)s_mvEma;
+    storageBegin();                                     /* one commit -> subscribers see both */
+    storageSet("battery.millivolt", (int)outMv);
+    storageSet("battery.percent",   (int)batteryPercent(outMv));
+    storageEnd();
+}
+
+}  // namespace
+
+/* init: hook — ADC bring-up, an initial reading, then the once-a-minute timer.
+ * Runs after spangapInit() so storage is up for the ephemeral writes. */
+void tdeckBatteryInit(void) {
+    if (adc_oneshot_io_to_channel(BOARD_BAT_ADC, &s_adcUnit, &s_adcChan) != ESP_OK) {
+        warn("battery: GPIO%d is not an ADC pin\n", BOARD_BAT_ADC);
+        return;
+    }
+    adc_oneshot_unit_init_cfg_t ucfg = {};
+    ucfg.unit_id = s_adcUnit;
+    if (adc_oneshot_new_unit(&ucfg, &s_adc) != ESP_OK) {
+        warn("battery: adc unit init failed\n");
+        return;
+    }
+    adc_oneshot_chan_cfg_t ccfg = {};
+    ccfg.atten    = ADC_ATTEN_DB_12;        /* ~0..3.1 V pin range; VBAT/2 maxes ~2.13 V */
+    ccfg.bitwidth = ADC_BITWIDTH_DEFAULT;
+    if (adc_oneshot_config_channel(s_adc, s_adcChan, &ccfg) != ESP_OK) {
+        warn("battery: adc channel config failed\n");
+        return;
+    }
+    adc_cali_curve_fitting_config_t cal = {};
+    cal.unit_id  = s_adcUnit;
+    cal.chan     = s_adcChan;
+    cal.atten    = ADC_ATTEN_DB_12;
+    cal.bitwidth = ADC_BITWIDTH_DEFAULT;
+    if (adc_cali_create_scheme_curve_fitting(&cal, &s_adcCali) != ESP_OK) {
+        s_adcCali = nullptr;                /* fall back to nominal raw->mV scaling */
+        warn("battery: adc calibration unavailable, using nominal scale\n");
+    }
+    s_adcReady = true;
+
+    batteryRead(nullptr);                   /* publish an initial reading now */
+
+    const esp_timer_create_args_t targs = { .callback = batteryRead, .arg = nullptr,
+        .dispatch_method = ESP_TIMER_TASK, .name = "battery", .skip_unhandled_events = true };
+    esp_timer_handle_t th = nullptr;
+    if (esp_timer_create(&targs, &th) == ESP_OK)
+        esp_timer_start_periodic(th, BAT_PERIOD_US);
+    else
+        warn("battery: timer create failed\n");
+}
 
 void tdeckStart(void) {
     tdeckPowerInit();                       /* power rail + shared-SPI CS park */
