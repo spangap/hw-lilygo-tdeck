@@ -143,8 +143,8 @@ copied here. They come from `spangap-browser` via the symlink
 The protocol-level deep dives now live in their owning straddles —
 the index that used to be in CLAUDE.md is:
 
-- **rnsd** — [docs/rnsd.md](docs/rnsd.md) (this app) +
-  [rns](../rns).
+- **rnsd** — [rns](../rns) ([README](../rns/README.md) /
+  [INTERNALS](../rns/INTERNALS.md)).
 - **tcp** — [docs/tcp.md](docs/tcp.md) +
   [iface-tcp](../iface-tcp).
 - **auto** — [docs/auto.md](docs/auto.md) +

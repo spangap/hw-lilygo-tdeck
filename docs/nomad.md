@@ -23,7 +23,7 @@
 > later*. Phasing detail lives in [`plans/nomad.md`](plans/nomad.md);
 > this is the black-box doc for consumers.
 
-Read [`lxmf.md`](lxmf.md) and [`rnsd.md`](rnsd.md) first — nomad is
+Read [`lxmf.md`](lxmf.md) and the [rns docs](../../rns) first — nomad is
 modelled on lxmf (storage-as-API, cmd sentinels, single `itsPoll`) and
 rides rnsd's Link request/response byte-array API.
 

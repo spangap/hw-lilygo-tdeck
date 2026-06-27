@@ -126,10 +126,10 @@ by reset). The board uses native ESP32-S3 USB CDC — no FT2232 / CP210x.
   primitive downstream consumers need; (2) typed conn-openers —
   `rnsdDestOpen()` for destinations plus `rnsdLinkOpen()` /
   `rnsdDestListenLinks()` for Links (implemented and hardware-verified;
-  see [docs/plans/link.md](docs/plans/link.md), exercised by `rnsd clink`).
+  see [rns/INTERNALS.md](../rns/INTERNALS.md), exercised by `rnsd clink`).
   Downstream tasks operate
   on raw byte arrays and storage sentinels; they never include
-  `RNS::Identity` or other mR types. → [docs/rnsd.md](docs/rnsd.md).
+  `RNS::Identity` or other mR types. → [rns/README.md](../rns/README.md).
 - `lxmf.cpp/h` — LXMF 0.9.8 messaging task. Sits on top of rnsd's
   byte-array API + the mailbox + announce-fanout ITS ports. **Zero
   mR includes**; mR is an implementation detail of rnsd. Storage is
@@ -249,7 +249,7 @@ by reset). The board uses native ESP32-S3 USB CDC — no FT2232 / CP210x.
 
 ## Subsystem deep dives
 
-- **rnsd** — [docs/rnsd.md](docs/rnsd.md). RNS protocol task: identity,
+- **rnsd** — [rns/README.md](../rns/README.md). RNS protocol task: identity,
   Reticulum/Transport bring-up, iface table, raw-packet API,
   announce logger, path-table snapshot, CLI (`rnsd`, `rnstatus`,
   `rnpath`, `rnprobe`).
