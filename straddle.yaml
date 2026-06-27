@@ -44,6 +44,32 @@ init:
   # Battery ADC monitor (esp-idf/src/tdeck.cpp): arms a 1/min esp_timer that
   # publishes battery.millivolt / battery.percent. Always on — no UI dependency.
   - call: tdeckBatteryInit
+
+# Declarative settings: the "T-Deck" pane + s.tdeck.* defaults are generated from
+# this block (the web panel is generated too — there is no hand-written one).
+# gps.* and s.lcd.* rows are defaultless: those defaults are owned by gps.cpp and
+# spangap-lcd respectively; this pane only surfaces the keys.
+settings:
+  - menu:
+      - { id: tdeck, label: "T-Deck" }
+    rows:
+      - section: "Board"
+      - value:  { label: "GPS",   key: "gps.model" }
+      - value:  { label: "Touch", key: "tdeck.touch" }
+      - section: "GPS"
+      - switch: { label: "Enable",       key: "s.gps.enable" }
+      - slider: { label: "Interval (s)", key: "s.gps.interval", min: 0, max: 10 }
+      - value:  { label: "Status",       key: "gps.state" }
+      - section: "Trackball"
+      - slider: { label: "Pointer speed",    key: "s.tdeck.trackball_speed",      min: 4, max: 40, default: 16 }
+      - slider: { label: "Cursor dwell (s)", key: "s.tdeck.pointer_visible_time", min: 1, max: 30, default: 2 }
+      - section: "Centre button"
+      - slider: { label: "Launcher hold (ms)", key: "s.tdeck.launcher_hold_ms", min: 0, max: 1000, default: 300 }
+      - slider: { label: "Standby hold (ms)",  key: "s.tdeck.standby_hold_ms",  min: 0, max: 1000, default: 1000 }
+      - section: "Display"
+      - slider: { label: "Backlight",       key: "s.lcd.backlight",          min: 0, max: 255 }
+      - slider: { label: "Sleep after (s)", key: "s.lcd.inactivity_timeout", min: 0, max: 120 }
+
 # Board VALUES, fed to the symbols other straddles / IDF DEFINE through the
 # collected staging/sdkconfig.spangap-fragments. A board straddle is non-
 # buildable, so its sdkconfig.defaults would be IGNORED — everything that

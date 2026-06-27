@@ -306,7 +306,6 @@ static void tdeckTrackballInit(void) {
      * sliders. Dwell = seconds the cursor stays after activity (-1 = always); spangap
      * owns the cursor but not this policy, so we push it in via lcdPointerSetVisibleMs.
      * All run on the lcd task — the subs dispatch here. */
-    storageDefault("s.tdeck.trackball_speed", s_tbSpeed);
     NOW_AND_ON_CHANGE("s.tdeck.trackball_speed", { s_tbSpeed = atoi(val); });
     storageDefault("s.tdeck.trackball_accel_min", s_tbAccelMin);
     NOW_AND_ON_CHANGE("s.tdeck.trackball_accel_min", { s_tbAccelMin = atoi(val); });
@@ -314,7 +313,6 @@ static void tdeckTrackballInit(void) {
     NOW_AND_ON_CHANGE("s.tdeck.trackball_accel_max", { s_tbAccelMax = atoi(val); });
     storageDefault("s.tdeck.trackball_smooth_ms", s_tbSmoothMs);
     NOW_AND_ON_CHANGE("s.tdeck.trackball_smooth_ms", { s_tbSmoothMs = atoi(val); });
-    storageDefault("s.tdeck.pointer_visible_time", 2);
     NOW_AND_ON_CHANGE("s.tdeck.pointer_visible_time",
                       { int s = atoi(val); lcdPointerSetVisibleMs(s < 0 ? -1 : s * 1000); });
 }
@@ -409,31 +407,6 @@ static bool tdeckPointerRead(int* x, int* y) {
     return (s_ptrX != ox || s_ptrY != oy);
 }
 
-/* Built-in "T-Deck" Settings panel (root level): the trackball + display knobs
- * that are this board's own. trackball_speed is ours (s.tdeck.*); the cursor
- * dwell and backlight are spangap's generic lcd keys, just surfaced here. */
-static void tdeckSettingsPane(void* arg) {
-    lv_obj_t* p = (lv_obj_t*)arg;
-    /* Board probe results up top: which GPS receiver we found (gps.cpp) and
-     * whether the GT911 touch answered on I2C (set in tdeckTouchInit). */
-    lcdSettingSection(p, "Board");
-    lcdSettingValue  (p, "GPS",   "gps.model");
-    lcdSettingValue  (p, "Touch", "tdeck.touch");
-    lcdSettingSection(p, "GPS");
-    lcdSettingSwitch (p, "Enable",       "s.gps.enable");
-    lcdSettingSlider (p, "Interval (s)", "s.gps.interval", 0, 10);   /* 0 = continuous, 1-10 = PSM cyclic */
-    lcdSettingValue  (p, "Status",       "gps.state");   /* "power-cycle to wake" etc. */
-    lcdSettingSection(p, "Trackball");
-    lcdSettingSlider (p, "Pointer speed",    "s.tdeck.trackball_speed",      4, 40);
-    lcdSettingSlider (p, "Cursor dwell (s)", "s.tdeck.pointer_visible_time", 1, 30);
-    lcdSettingSection(p, "Centre button");
-    lcdSettingSlider (p, "Launcher hold (ms)", "s.tdeck.launcher_hold_ms", 0, 1000);   /* hold this long -> launcher */
-    lcdSettingSlider (p, "Standby hold (ms)",  "s.tdeck.standby_hold_ms",  0, 1000);   /* + this much more -> standby */
-    lcdSettingSection(p, "Display");
-    lcdSettingSlider (p, "Backlight",        "s.lcd.backlight",              0, 255);
-    lcdSettingSlider (p, "Sleep after (s)",  "s.lcd.inactivity_timeout",     0, 120);
-}
-
 /* lcd_input.h init hook — runs on the lcd task once the panel and the shared
  * GPIO ISR service are up. Wire the board's input: GT911 touch, centre button,
  * trackball. */
@@ -447,9 +420,7 @@ static void tdeckInputInit(void) {
      * what actually sleeps/wakes the device — display off via lcdScreenSleep/Wake,
      * plus our own input (touch + keyboard scan) off. This init runs on the lcd
      * task, so the subscription dispatches there and lcdScreenSleep/Wake are safe. */
-    storageDefault("s.tdeck.launcher_hold_ms", s_launcherMs);
     NOW_AND_ON_CHANGE("s.tdeck.launcher_hold_ms", { s_launcherMs = atoi(val); });
-    storageDefault("s.tdeck.standby_hold_ms", s_standbyMs);
     NOW_AND_ON_CHANGE("s.tdeck.standby_hold_ms", { s_standbyMs = atoi(val); });
     storageSubscribeChanges("sys.standby", ON_CHANGE { tdeckStandby(atoi(val) != 0); });
 }
@@ -465,7 +436,6 @@ void tdeckLcdStart(void) {
         .click_read   = tdeckClickRead,
     };
     lcdSetInput(&ops);
-    lcdRegisterSettings("T-Deck", "T-Deck", tdeckSettingsPane);
 }
 
 /* ---- QWERTY keyboard, end to end --------------------------------------------
@@ -672,7 +642,12 @@ void tdeckLcdInit(void) {
 
     s_queue = xQueueCreate(16, 1);
     lcdRun(kbCreateIndev);                  /* create the indev on the lcd task */
-    xTaskCreatePinnedToCore(pollTask, "kbpoll", 3072, nullptr, 1, &s_pollTask, 1);
+    /* Prio 3: one notch above the lcd task (prio 2) so a long synchronous redraw
+     * on it (e.g. a search-box list rebuild) can't starve the poll on core 1 —
+     * the C3 holds only the last unread key, so a stalled poll drops keystrokes.
+     * Not higher: the read takes the shared I2C0 bus (touch, audio codec), and
+     * polling it hard at high prio would inject latency into those. */
+    xTaskCreatePinnedToCore(pollTask, "kbpoll", 3072, nullptr, 3, &s_pollTask, 1);
 
     lcdSetHasKeyboard(true);                /* lcd: suppress the on-screen keyboard */
 }
