@@ -509,10 +509,11 @@ void readCb(lv_indev_t*, lv_indev_data_t* data) {
     if (s_queue && xQueueReceive(s_queue, &raw, 0) == pdTRUE && raw) {
         s_again = true;
         uint32_t k;
-        if (raw == 0x0C) {                          /* prefix — swallow, arm for 1 s */
-            ctrlUntil = xTaskGetTickCount() + pdMS_TO_TICKS(1000);
-            k = 0;
-        } else if (ctrlUntil && (long)(ctrlUntil - xTaskGetTickCount()) > 0
+        bool armed = ctrlUntil && (long)(ctrlUntil - xTaskGetTickCount()) > 0;
+        if (raw == 0x0C) {                          /* prefix */
+            if (armed) { ctrlUntil = 0; k = LV_KEY_ESC; }  /* Alt-C Alt-C -> ESC */
+            else { ctrlUntil = xTaskGetTickCount() + pdMS_TO_TICKS(1000); k = 0; }  /* arm for 1 s */
+        } else if (armed
                    && raw >= 'a' && raw <= 'z') {
             ctrlUntil = 0;
             k = LCD_KEY_CTRL | raw;                 /* Ctrl-<letter> */

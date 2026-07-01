@@ -76,10 +76,14 @@ settings:
 # describes this hardware MUST live here in kconfig: to survive `--with`.
 kconfig:
   # Board memory: 16 MB flash, 8 MB octal PSRAM (ESP32-S3FN16R8).
-  # Flash size is intentionally NOT pinned: spangap ships a 4 MB floor image and
-  # the firmware self-grows to the real 16 MB at first boot (see statePartitionEnsure
-  # in fs.cpp), so one image is universal across flash sizes. Pin it back only to
-  # disable self-grow for this board.
+  # Flash size is pinned to the board's real 16 MB. The T-Deck is always a 16 MB
+  # part, so there's no reason to ship the cramped 4 MB floor image (whose
+  # app+fixed must fit under 4 MB — the full feature set was already at ~4% free).
+  # Pinning builds for the full 16 MB: the build-time partition ceiling moves to
+  # 16 MB so app/fixed grow freely. `state` is unchanged — statePartitionEnsure()
+  # (fs.cpp) still reads the real physical size via SFDP and registers it in the
+  # upper half of flash at runtime.
+  - CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
   - CONFIG_SPIRAM_MODE_OCT=y
   # PSRAM runs at spangap-core's 80 MHz default. (Briefly tried 40 MHz chasing
   # `cat`-during-flash crashes, but those were PSRAM-*placement* bugs — FreeRTOS
