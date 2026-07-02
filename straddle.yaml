@@ -13,7 +13,7 @@ schema_version: 1
 name: reticulous/hw-tdeck
 prefix: tdeck
 firmware: esp-idf
-version: 0.1.0
+version: 0.0.0
 platforms: [idf]
 # The one thing this board pulls in: the on-device LCD UI, because the T-Deck
 # physically has a screen. Everything else (the mesh, the IP/web platform) comes
