@@ -75,15 +75,19 @@ settings:
 # buildable, so its sdkconfig.defaults would be IGNORED — everything that
 # describes this hardware MUST live here in kconfig: to survive `--with`.
 kconfig:
-  # Board memory: 16 MB flash, 8 MB octal PSRAM (ESP32-S3FN16R8).
-  # Flash size is pinned to the board's real 16 MB. The T-Deck is always a 16 MB
-  # part, so there's no reason to ship the cramped 4 MB floor image (whose
-  # app+fixed must fit under 4 MB — the full feature set was already at ~4% free).
-  # Pinning builds for the full 16 MB: the build-time partition ceiling moves to
-  # 16 MB so app/fixed grow freely. `state` is unchanged — statePartitionEnsure()
-  # (fs.cpp) still reads the real physical size via SFDP and registers it in the
-  # upper half of flash at runtime.
+  # Board memory: 16 MB flash, 8 MB octal PSRAM (ESP32-S3FN16R8). Two numbers:
+  #   * FLASHSIZE — the flash CONTAINER / bootloader-header size. Pinned to the
+  #     board's real 16 MB so the header matches the chip (no esptool size-mismatch
+  #     warning) and the build can report a concrete /state size. /state starts at
+  #     the floor below, NOT the container, so this no longer has to be < the chip
+  #     as it briefly did under the earlier state-at-container design.
+  #   * MAX_FIRMWARE_KB — the byte-granular MAXIMUM FIRMWARE SIZE = the offset where
+  #     /state begins. 6 MB = app+fixed (~3.7 MB) plus ~2.2 MB of growth headroom.
+  #     /state fills the rest of the real chip → ~10 MB here.
+  # Changing MAX_FIRMWARE_KB relocates /state → existing devices factory-reset on
+  # the next boot, so warn users before bumping it.
   - CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+  - CONFIG_SPANGAP_MAX_FIRMWARE_KB=8192
   - CONFIG_SPIRAM_MODE_OCT=y
   # PSRAM runs at spangap-core's 80 MHz default. (Briefly tried 40 MHz chasing
   # `cat`-during-flash crashes, but those were PSRAM-*placement* bugs — FreeRTOS
