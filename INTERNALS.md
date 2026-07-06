@@ -339,6 +339,32 @@ four hardware mics only one is populated on the board (the rest are unconnected)
   T-Deck; queues/stream-buffers/mutexes in PSRAM trip the `S32C1I` spinlock
   assert. Task stacks and large buffers go in PSRAM (`STACK_PSRAM`); sync objects
   stay internal.
+- **SD writes failing with `not enough mem, err=0x101` are DMA-pool exhaustion,
+  not a bad card.** `E [fs_strm] sdmmc_cmd: sdmmc_write_sectors: not enough mem,
+  err=0x101` (plus a `diskio_sdmmc` follow-on) means the scarce internal
+  DMA-capable RAM — already mostly claimed by LCD/LVGL and WiFi — has no 512-byte
+  block left. The T-Deck runs its SD on the shared FSPI bus
+  (`CONFIG_SPANGAP_SDCARD_BUS_SPI`), where stock `sdmmc_cmd` bounces every
+  PSRAM-sourced or unaligned sector through a per-write
+  `heap_caps_malloc(512, MALLOC_CAP_DMA)` that then fails. spangap-core fixes this
+  at the source and the board just inherits it: its `CMakeLists.txt` defines
+  `SOC_SDMMC_PSRAM_DMA_CAPABLE=1` for the `sdmmc` component on SD-on-SPI builds
+  (so SDSPI's own once-allocated block buffer absorbs PSRAM traffic and the
+  per-write bounce is skipped), and the fs worker gives SD-backed files a
+  one-sector `setvbuf` plus sub-sector chunked writes (`fsSdFwrite`) so FatFs
+  never hands `disk_write` an unaligned multi-sector run — the mid-sector-append
+  case the macro alone can't cover. Don't chase 0x101 by freeing internal RAM;
+  fix SD writes at the source. See
+  [spangap-core fs internals](../spangap-core/docs/fs-internals.md) and
+  [idf-tweaks](../spangap-core/docs/idf-tweaks.md).
+- **Never enable `CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP` on the T-Deck.** It looks
+  like an easy way to reclaim internal RAM (e.g. to relieve the 0x101 above), but
+  this is a display board: LCD/LVGL already hold the internal DMA pool, and
+  nudging WiFi/lwIP toward PSRAM tips WiFi's 16 internal-DMA-only static RX
+  buffers over the edge — `malloc buffer fail` / `Expected to init 16 rx buffer,
+  actual is 12`, and WiFi never inits. It is only safe per-board on the
+  display-less seeed, never blanket in `sdkconfig.defaults.spangap`. See
+  [spangap-core memory internals](../spangap-core/docs/memory-internals.md).
 - **GT911 address is INT-level-latched, with no reset to force it.** Always probe
   both 0x5D and 0x14; never hardcode. The wrong-address ERROR logs during the
   probe are expected, not a fault.
