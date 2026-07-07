@@ -295,10 +295,13 @@ and `meshtastic/firmware/variants/esp32s3/t-deck/variant.h`.
   - `BOARD_I2S_BCK  = GPIO 7`
   - `BOARD_I2S_WS   = GPIO 5`
   - `BOARD_I2S_DOUT = GPIO 6`
-  - MCLK is **shared with the ES7210 LRCK line at GPIO 21** in the
-    Meshtastic mapping (unusual — verify before assuming both can
-    run simultaneously; LilyGo factory firmware operates them
-    mutually exclusively).
+  - The MAX98357A is a self-clocking Class-D device with **no MCLK
+    input at all**; GPIO 21 is purely the ES7210's word-select.
+    Mic and speaker run **full-duplex** on two physically separate
+    I2S controllers (mic on I2S0, speaker on I2S1 — see
+    spangap/audio). The LilyGo factory firmware operates them
+    mutually exclusively, but that is a software choice, not a
+    hardware constraint.
 - **Headphone jack:** none on the original T-Deck.
 
 #### Storage
