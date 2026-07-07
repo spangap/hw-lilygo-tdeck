@@ -21,6 +21,7 @@
  */
 #include "audio.h"
 #include "tdeck.h"
+#include "tdeck_audio.h"
 #include "log.h"
 #include "driver/i2c_master.h"
 #include <cstdint>
@@ -102,7 +103,8 @@ static const audio_codec_ops_t es7210_ops = {
   es7210InInit, es7210InDeinit, nullptr, nullptr,
 };
 
-/* init: hook (C++ linkage, no extern "C"), gated when: spangap/audio. */
-void tdeckAudioInit(void) {
+/* onInit — register the board codec with the audio straddle. Service gated
+ * when: spangap/audio (whole slice compiles only when audio is staged). */
+void TdeckAudio::onInit() {
   audioRegisterCodec(&es7210_ops);
 }

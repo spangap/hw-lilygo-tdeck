@@ -213,9 +213,9 @@ void batteryRead(void*) {
 
 }  // namespace
 
-/* init: hook — ADC bring-up, an initial reading, then the once-a-minute timer.
+/* onInit — ADC bring-up, an initial reading, then the once-a-minute timer.
  * Runs after spangapInit() so storage is up for the ephemeral writes. */
-void tdeckBatteryInit(void) {
+void TdeckBattery::onInit() {
     if (adc_oneshot_io_to_channel(BOARD_BAT_ADC, &s_adcUnit, &s_adcChan) != ESP_OK) {
         warn("battery: GPIO%d is not an ADC pin\n", BOARD_BAT_ADC);
         return;
@@ -255,7 +255,7 @@ void tdeckBatteryInit(void) {
         warn("battery: timer create failed\n");
 }
 
-void tdeckStart(void) {
+void TdeckBoard::onStart() {
     tdeckPowerInit();                       /* power rail + shared-SPI CS park */
     /* Create the shared I2C0 bus now, while we're still single-threaded — touch
      * (lcd task), keyboard (kbpoll task) and the RTC (gps task) all bring it up

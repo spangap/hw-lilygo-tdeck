@@ -7,4 +7,11 @@
  * seconds. Gated by s.gps.enable. See gps.cpp for the wire/parse details.
  */
 #pragma once
-void gpsInit(void);
+#include "service.h"
+
+/** The GNSS receiver as a boot-registered Service: onInit spawns the GPS task
+ *  (gated by s.gps.enable). Declared in hw-tdeck straddle.yaml `services:`. */
+class GpsService : public Service {
+public:
+    void onInit() override;
+};

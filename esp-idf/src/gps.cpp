@@ -871,7 +871,7 @@ static void gpsTaskMain(void*) {
  * own "T-Deck" Settings pane (tdeck.cpp), not a pane of our own — that's where
  * the user asked for them, alongside the touch-probe status. */
 
-void gpsInit(void) {
+void GpsService::onInit() {
     if (storageGetInt("s.gps.version", 0) < GPS_VERSION) {
         storageDefault("s.gps.enable", 1);   /* T-Deck has the GPS hardware → on by default; user owns it after */
         storageDefault("s.gps.interval", 5);   /* 0 = continuous tracking, 1-10 = PSMCT period (s) */

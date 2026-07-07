@@ -22,6 +22,7 @@
 
 #include "driver/i2c_master.h"
 #include "sdkconfig.h"
+#include "service.h"
 
 #define BOARD_NAME              "T-Deck Plus"
 /* Master peripheral power-enable pin. T-Deck (Plus) gates the +3.3 V rail to
@@ -89,20 +90,26 @@
  *
  * The on-device-UI input HAL (touch/trackball/button) and the QWERTY keyboard
  * live in conditional/spangap-lcd/src/tdeck_lcd.cpp and run via two
- * when: spangap/spangap-lcd hooks — tdeckLcdStart (start: band, input HAL
- * register before lcdInit) and tdeckLcdInit (init: band, keyboard, needs the lcd
- * task). Both are compiled and called only when spangap-lcd is staged, so no
- * #if is needed anywhere.
+ * when: spangap/spangap-lcd companion (TdeckLcdInput) — onStart (start band,
+ * input HAL register before lcdInit) and onInit (init band, keyboard, needs the
+ * lcd task). Compiled and registered only when spangap-lcd is staged, so no #if
+ * is needed anywhere.
  */
-void tdeckStart(void);
+class TdeckBoard : public Service {
+public:
+    void onStart() override;   /* was tdeckStart */
+};
 
 /**
- * Battery monitor bring-up: configures the GPIO4 ADC, publishes an initial
- * battery.millivolt / battery.percent, and arms a once-a-minute esp_timer to
- * keep them fresh. init: band (needs storage up). No task of its own — the
- * periodic timer callback does the sampling.
+ * Battery monitor bring-up (onInit): configures the GPIO4 ADC, publishes an
+ * initial battery.millivolt / battery.percent, and arms a once-a-minute
+ * esp_timer to keep them fresh. init band (needs storage up). No task of its own
+ * — the periodic timer callback does the sampling.
  */
-void tdeckBatteryInit(void);
+class TdeckBattery : public Service {
+public:
+    void onInit() override;    /* was tdeckBatteryInit */
+};
 
 /**
  * Shared I2C0 master bus (SDA=BOARD_TOUCH_I2C_SDA, SCL=BOARD_TOUCH_I2C_SCL).

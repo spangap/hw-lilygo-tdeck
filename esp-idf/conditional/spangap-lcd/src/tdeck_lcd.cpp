@@ -9,6 +9,7 @@
  * come from tdeck.h.
  */
 #include "tdeck.h"
+#include "tdeck_lcd.h"
 #include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -425,10 +426,10 @@ static void tdeckInputInit(void) {
     storageSubscribeChanges("sys.standby", ON_CHANGE { tdeckStandby(atoi(val) != 0); });
 }
 
-/* Register this board's input HAL with the lcd component. Called from
- * tdeckStart() before spangapInit(). The display itself is the component's
- * (CONFIG_LCD_*); we supply only input. */
-void tdeckLcdStart(void) {
+/* onStart — register this board's input HAL with the lcd component, before
+ * spangapInit()/lcdInit(). The display itself is the component's (CONFIG_LCD_*);
+ * we supply only input. */
+void TdeckLcdInput::onStart() {
     static const lcd_input_t ops = {
         .init         = tdeckInputInit,
         .touch_read   = tdeckTouchRead,
@@ -614,9 +615,9 @@ static void tdeckStandby(bool on) {
     }
 }
 
-/* Bring up the keyboard. Called from tdeckInit() AFTER spangapInit() — it
- * needs the lcd task to exist so it can create + drive its indev via lcdRun(). */
-void tdeckLcdInit(void) {
+/* onInit — bring up the keyboard, AFTER spangapInit(): it needs the lcd task to
+ * exist so it can create + drive its indev via lcdRun(). */
+void TdeckLcdInput::onInit() {
     i2c_master_bus_handle_t bus = tdeckI2cBus();
     if (!bus) { warn("keyboard: no i2c bus\n"); return; }
 
