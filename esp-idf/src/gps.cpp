@@ -62,6 +62,7 @@
 #include "tdeck.h"
 #include "rtc.h"
 #include "spangap.h"
+#include "pm.h"
 
 #include "driver/uart.h"
 #include "esp_timer.h"
@@ -148,6 +149,7 @@ static bool          s_running  = false;   /* UART installed + listening */
 static int           s_baud     = 0;       /* last detected baud (kept across disable) */
 static int           s_interval = 5;       /* s.gps.interval: 0 = continuous, 1-10 = PSMCT period (s) */
 static bool          s_needsPowerCycle = false;  /* L76K put in FORCE-pin-only backup */
+static pm_lock_handle_t s_pmLock = nullptr;      /* held only across autobaud detection */
 
 static GpsFix        s_fix;
 static std::string   s_line;               /* incremental NMEA line assembly */
@@ -730,7 +732,15 @@ static void applyConfig(void) {
     }
 
     publishModel("detecting", "detecting...", 0);
+    /* Hold off light sleep across autobaud only. The UART runs on the APB clock
+     * and the detect loop blocks in uart_read_bytes, so tickless idle would gate
+     * the UART mid-listen and drop the NMEA stream — the receiver reads as absent
+     * at every baud. A locked-on receiver tolerates light sleep, so this covers
+     * just the detect window (previously masked by WiFi's pre-connect scan lock,
+     * until WiFi bring-up was deferred past the boot storm). */
+    pmLockAcquire(s_pmLock);
     s_baud = gpsAutobaud();
+    pmLockRelease(s_pmLock);
     if (s_baud == 0) {
         warn("no NMEA on UART (RX=%d) at any baud", BOARD_GPS_RX_PIN);
         publishModel("not detected", "not detected", 0);
@@ -879,5 +889,6 @@ void GpsService::onInit() {
         storageSet("s.gps.version", GPS_VERSION);
     }
     cliRegisterCmd("gps", cliGps);
+    pmLockCreate(PM_NO_LIGHT_SLEEP, "gps", &s_pmLock);
     s_task = spawnTask(gpsTaskMain, TAG, 6144, nullptr, 2, 0, STACK_PSRAM);
 }
