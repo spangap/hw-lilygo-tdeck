@@ -11,6 +11,7 @@
 #include "tdeck.h"
 #include "tdeck_lcd.h"
 #include "driver/gpio.h"
+#include "hal/gpio_ll.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -18,6 +19,7 @@
 #include "lcd.h"
 #include "storage.h"
 #include "log.h"
+#include "pm.h"
 
 #include "driver/i2c_master.h"
 #include "esp_attr.h"
@@ -167,6 +169,44 @@ static bool           s_wakeAbsorb   = false;     /* swallow the rest of a trans
 static volatile bool  s_standby      = false;     /* mirror of sys.standby (set on the lcd task) */
 static int            s_launcherMs   = 300;       /* s.tdeck.launcher_hold_ms */
 static int            s_standbyMs    = 1000;      /* s.tdeck.standby_hold_ms (added on top of launcher) */
+/* Standby wake: the button is re-armed as a genuine light-sleep wake source
+ * (pmGpioWakeEnable — LOW_LEVEL, since edges are invisible while the GPIO clock
+ * is gated, and sleep-isolation-exempt via gpio_sleep_sel_dis; same pattern as
+ * LoRa's DIO1). Two button-specific wrinkles the radio pin doesn't have:
+ *
+ *  - A level-triggered ISR re-fires for as long as the line is held — DIO1
+ *    drops within µs when the IRQ is read, a finger doesn't, so an unmitigated
+ *    LOW_LEVEL ISR storms its core for the whole press (a >5 s hold would trip
+ *    the task WDT). tdeckStandbyBtnISR therefore silences the pin on first fire;
+ *    tdeckClickRead re-enables it after handling.
+ *
+ *  - Standby is usually *entered by a press* that is still down. The LOW_LEVEL
+ *    wake can only be armed once that finger lifts, so s_standbyLock holds the
+ *    CPU out of light sleep for just that entry-press window (previously it was
+ *    held for the whole standby — the GPIO wake looked broken because the pin
+ *    was sleep-isolated, before pmGpioWakeEnable learned gpio_sleep_sel_dis). */
+static pm_lock_handle_t s_standbyLock = nullptr;
+static bool             s_wakeArmed   = false;   /* LOW_LEVEL wake source live */
+
+/* First fire of the LOW_LEVEL wake press: silence the pin (see storm note
+ * above), then the normal notify. LL register write, not gpio_intr_disable() —
+ * the driver call takes a non-ISR spinlock. IRAM: the ISR service is installed
+ * with ESP_INTR_FLAG_IRAM. */
+static void IRAM_ATTR tdeckStandbyBtnISR(void* arg) {
+    gpio_ll_intr_disable(&GPIO, (gpio_num_t)BOARD_HOME_BTN_PIN);
+    lcdInputISR(arg);
+}
+
+/* Arm the centre button as the light-sleep wake source (lcd task, in standby,
+ * button up) and let the CPU sleep. Level semantics cover the handler-swap gap:
+ * a press racing the swap still fires once LOW_LEVEL is set. */
+static void tdeckWakeArm(void) {
+    gpio_isr_handler_remove((gpio_num_t)BOARD_HOME_BTN_PIN);
+    gpio_isr_handler_add((gpio_num_t)BOARD_HOME_BTN_PIN, tdeckStandbyBtnISR, nullptr);
+    pmGpioWakeEnable(BOARD_HOME_BTN_PIN, GPIO_INTR_LOW_LEVEL);
+    s_wakeArmed = true;
+    pmLockRelease(s_standbyLock);
+}
 
 static void tdeckButtonInit(void) {
     gpio_config_t io = {};
@@ -211,15 +251,29 @@ static bool tdeckClickRead(void) {
     bool down = gpio_get_level((gpio_num_t)BOARD_HOME_BTN_PIN) == 0;   /* active-low */
 
     /* Swallow the remainder of a press that already caused a transition (woke us,
-     * or was held into standby) until the finger lifts. */
+     * or was held into standby) until the finger lifts. The lift of the press
+     * that *entered* standby is also the moment the LOW_LEVEL wake source can
+     * be armed (see tdeckWakeArm). */
     if (s_wakeAbsorb) {
-        if (!down) s_wakeAbsorb = false;
+        if (!down) {
+            s_wakeAbsorb = false;
+            if (s_standby && !s_wakeArmed) tdeckWakeArm();
+        }
         return false;
     }
     /* In standby the only live input is this button: a press just wakes (clears
      * sys.standby) and is absorbed — never a click or a hold. */
     if (s_standby) {
+        if (!s_wakeArmed) {
+            /* Entry press still down (or a programmatic standby raced a press):
+             * s_standbyLock is holding sleep off until we can arm on release. */
+            if (!down) tdeckWakeArm();
+            return false;
+        }
         if (down) { storageSet("sys.standby", 0); s_wakeAbsorb = true; }
+        /* Released before we polled (a blip): the wake ISR silenced the pin —
+         * re-arm it or the button goes deaf for the rest of standby. */
+        else gpio_intr_enable((gpio_num_t)BOARD_HOME_BTN_PIN);
         return false;
     }
 
@@ -606,8 +660,25 @@ static void tdeckStandby(bool on) {
     if (on) {
         s_touchAsleep = true;                          /* GT911 reads return nothing */
         lcdScreenSleep();                              /* display off, backlight to 0 */
+        /* Hold the CPU out of light sleep only until the LOW_LEVEL wake source
+         * is armed — the entry press must lift first (see s_standbyLock). Armed
+         * right away when standby came programmatically (cron/CLI, button up). */
+        if (!s_standbyLock) pmLockCreate(PM_NO_LIGHT_SLEEP, "standby", &s_standbyLock);
+        pmLockAcquire(s_standbyLock);
+        if (gpio_get_level((gpio_num_t)BOARD_HOME_BTN_PIN) != 0) tdeckWakeArm();
         info("standby\n");
     } else {
+        if (s_wakeArmed) {
+            /* Back to the awake config: plain ANYEDGE ISR, no sleep wake. (The
+             * lock was already dropped when the wake source was armed.) */
+            s_wakeArmed = false;
+            pmGpioWakeDisable(BOARD_HOME_BTN_PIN);
+            gpio_set_intr_type((gpio_num_t)BOARD_HOME_BTN_PIN, GPIO_INTR_ANYEDGE);
+            gpio_isr_handler_remove((gpio_num_t)BOARD_HOME_BTN_PIN);
+            gpio_isr_handler_add((gpio_num_t)BOARD_HOME_BTN_PIN, lcdInputISR, nullptr);
+        } else {
+            pmLockRelease(s_standbyLock);              /* never armed — still held */
+        }
         s_touchAsleep = false;
         if (s_pollTask) xTaskNotifyGive(s_pollTask);   /* unpark the keyboard scan */
         lcdScreenWake();                               /* display on, backlight fade-in */
