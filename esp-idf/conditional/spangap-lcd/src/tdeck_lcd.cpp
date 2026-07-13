@@ -506,8 +506,8 @@ void TdeckLcdInput::onStart() {
  *
  * So a dedicated low-prio task polls the I2C off the lcd task, buffers keys into
  * a queue, and bumps the lcd task (lcdRun) to drain them through our LVGL keypad
- * indev. We keep GPIO46 wired anyway: the first edge ever seen flips us from
- * polling to interrupt-driven (self-healing if a future firmware drives it).
+ * indev. We keep GPIO46 wired anyway: an edge wakes the poll early and is
+ * reported by the kbint diagnostic (useful if a future firmware drives it).
  *
  * Dependency is one-way: we call into lcd (lcdRun / lcdInputGroup /
  * lcdSetHasKeyboard); the lcd component has no knowledge of the keyboard. */
@@ -518,15 +518,12 @@ QueueHandle_t           s_queue      = nullptr;   /* bytes: poll task -> lcd tas
 TaskHandle_t            s_pollTask   = nullptr;
 lv_indev_t*             s_indev      = nullptr;    /* our keypad indev (lcd task) */
 bool                    s_again      = false;      /* lcd task: more to drain this cycle */
-volatile bool           s_intSeen    = false;      /* set once GPIO46 actually fires */
 volatile uint32_t       s_intCount   = 0;          /* for the kbint diagnostic */
 
-/* Adaptive poll: snappy right after a key, lazy when idle (the C3 buffers keys,
- * so a slow poll only delays the first keypress, never drops one). Once the INT
- * fires we drop to a long fallback — essentially interrupt-driven. */
-constexpr TickType_t POLL_FAST = pdMS_TO_TICKS(30);
-constexpr TickType_t POLL_IDLE = pdMS_TO_TICKS(200);
-constexpr TickType_t INT_WAIT  = pdMS_TO_TICKS(2000);
+/* Fixed poll period. The C3 holds only the last unread key (no buffer), so any
+ * lazy backoff drops keystrokes under fast typing; standby parks the task, so
+ * the always-on 30 ms scan costs nothing while the device sleeps. */
+constexpr TickType_t POLL_PERIOD = pdMS_TO_TICKS(30);
 
 uint32_t mapAsciiKey(uint32_t b) {
     switch (b) {
@@ -616,7 +613,6 @@ void kbCreateIndev(void*) {
 
 void IRAM_ATTR kbIntIsr(void*) {
     s_intCount = s_intCount + 1;       /* plain store: '++' on volatile is deprecated */
-    s_intSeen  = true;                 /* flip the poll loop to interrupt-driven */
     if (!s_pollTask) return;
     BaseType_t hp = pdFALSE;
     vTaskNotifyGiveFromISR(s_pollTask, &hp);
@@ -624,27 +620,25 @@ void IRAM_ATTR kbIntIsr(void*) {
 }
 
 void pollTask(void*) {
-    bool active = false;
     for (;;) {
         /* Parked in standby: stop scanning the I2C keyboard entirely (the centre
          * button is the only thing left to wake the device). tdeckStandby unparks
          * us with a notify. Park on a clean self-check, not a suspend, so we never
          * stop mid-I2C-transaction holding the shared bus. */
         if (s_standby) { ulTaskNotifyTake(pdTRUE, portMAX_DELAY); continue; }
-        TickType_t wait = s_intSeen ? INT_WAIT : (active ? POLL_FAST : POLL_IDLE);
-        ulTaskNotifyTake(pdTRUE, wait);    /* woken by the INT, or times out to poll */
-        active = false;
+        ulTaskNotifyTake(pdTRUE, POLL_PERIOD);  /* woken by the INT, or times out to poll */
         if (s_standby) continue;           /* entered standby during the wait */
         /* Drain up to a queueful per wake — bounded so a wedged keyboard that
          * keeps returning a byte can't spin this task. */
+        bool got = false;
         for (int i = 0; i < 16; i++) {
             uint32_t k = i2cReadKey();
             if (!k) break;
             uint8_t b = (uint8_t)k;
             xQueueSend(s_queue, &b, 0);
-            active = true;
+            got = true;
         }
-        if (active) lcdRun(kbDrain);        /* bump the lcd task to read our indev */
+        if (got) lcdRun(kbDrain);           /* bump the lcd task to read our indev */
     }
 }
 

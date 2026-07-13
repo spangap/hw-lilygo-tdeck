@@ -294,8 +294,9 @@ indev model, so it lives in the consumer, not spangap-core:
   peek/count), so you can't tell a key is pending without consuming it.
 
 So a dedicated low-prio `kbpoll` task (**prio 3, core 1**) polls the I2C off the
-LCD task — adaptive: `POLL_FAST` (30 ms) right after a key, `POLL_IDLE` (200 ms)
-when idle (the C3 buffers keys, so a lazy poll only delays the first keypress).
+LCD task at a fixed `POLL_PERIOD` (30 ms). The C3 holds only the last unread
+key (no buffer), so a lazy/adaptive backoff drops keystrokes under fast typing;
+standby parks the task, so the always-on scan costs nothing while asleep.
 It buffers bytes into a queue and bumps the LCD task via `lcdRun(kbDrain)` to
 drain them through an LVGL keypad indev joined to `lcdInputGroup()`. Prio 3 is
 one notch above the LCD task so a long synchronous redraw can't starve the poll
@@ -303,9 +304,9 @@ one notch above the LCD task so a long synchronous redraw can't starve the poll
 shared I2C0 bus (touch, codec). `lcdSetHasKeyboard(true)` tells the component to
 suppress the on-screen keyboard.
 
-GPIO 46 is still wired `ANYEDGE`: the **first edge ever seen flips the reader
-from polling to interrupt-driven** (`s_intSeen` → `INT_WAIT` 2 s fallback) —
-self-healing if a future C3 firmware ever drives it. The indev is created lazily
+GPIO 46 is still wired `ANYEDGE`: an edge wakes the poll early and is counted
+for the `kbint` diagnostic (useful if a future C3 firmware ever drives it).
+The indev is created lazily
 in `kbDrain` (not in `tdeckLcdInit`): `tdeckLcdInit` fires `lcdRun(kbCreateIndev)`
 right after `spangapInit()`, which can land before the LCD task has registered
 its `LCD_RUN_PORT` aux handler, so the create can silently fail; `kbDrain` runs
