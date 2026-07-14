@@ -883,10 +883,12 @@ static void gpsTaskMain(void*) {
 
 void GpsService::onInit() {
     if (storageGetInt("s.gps.version", 0) < GPS_VERSION) {
+        storageBegin();
         storageDefault("s.gps.enable", 1);   /* T-Deck has the GPS hardware → on by default; user owns it after */
         storageDefault("s.gps.interval", 5);   /* 0 = continuous tracking, 1-10 = PSMCT period (s) */
         storageDefault("s.gps.ignore_clock", 0);   /* 1 = don't set the system clock from GPS */
         storageSet("s.gps.version", GPS_VERSION);
+        storageEnd();
     }
     cliRegisterCmd("gps", cliGps);
     pmLockCreate(PM_NO_LIGHT_SLEEP, "gps", &s_pmLock);
