@@ -23,6 +23,7 @@
 
 #include "driver/i2c_master.h"
 #include "esp_attr.h"
+#include "esp_sleep.h"
 #include "esp_timer.h"
 #include "freertos/queue.h"
 
@@ -45,6 +46,8 @@ static bool tdeckClickRead(void);
 static void tdeckTrackballInit(void);
 static bool tdeckPointerRead(int* x, int* y);
 static void tdeckStandby(bool on);
+static bool tdeckTouchSample(void);            /* poll task: read GT911 → latch */
+static void tdeckTouchIsr(void*);              /* GT911 INT → wake the poll task (IRAM, see defn) */
 
 /* GT911 handle, created in tdeckInputInit(); null if the controller didn't
  * answer (then tdeckTouchRead reports no touches and the indev never fires). */
@@ -52,6 +55,30 @@ static esp_lcd_touch_handle_t s_touch = nullptr;
 /* True while in standby: the GT911 reads are gated off (only the centre button is
  * left live to wake the device). Set by tdeckStandby on the lcd task. */
 static bool                   s_touchAsleep = false;
+
+/* ---- touch latch: sampled on the poll task, read on the lcd task -------------
+ * The GT911 read moved off the lcd task onto the keyboard poll task, so a touch
+ * read never waits behind a render and never fights the render for the shared
+ * I2C0 bus (the two used to contend). tdeckTouchSample() (poll task) does the
+ * I2C read and stores the sample here; tdeckTouchRead() (lcd task, the
+ * lcd_input.h touch_read) just returns it — no hardware access.
+ *
+ * Missed-tap replay: if a whole tap completes (finger down then up, no real
+ * movement) while the lcd task was too busy to read even one pressed sample, the
+ * poll task latches a one-shot "pending tap" at the down point so it still lands
+ * as a click. A gesture that moved past TOUCH_CLICK_R is a DRAG and is never
+ * replayed this way — so a drag missed during a stall is simply lost, never
+ * turned into a false click. All fields below are guarded by s_touchMux. */
+static portMUX_TYPE           s_touchMux = portMUX_INITIALIZER_UNLOCKED;
+static int16_t                s_tX[5], s_tY[5];        /* latest sample, native coords */
+static int                    s_tCount = 0;            /* fingers in the latest sample */
+static bool                   s_tapPending = false;    /* an unread tap waiting to replay */
+static int16_t                s_tapX = 0, s_tapY = 0;  /* its down point */
+static bool                   s_gestureConsumed = false; /* lcd read a press this gesture */
+static bool                   s_touchDown = false;     /* poll task's view of finger-down */
+/* Beyond this radius from the down point (native px) a gesture is a drag, not a
+ * tap — matches the order of LVGL's own scroll threshold. */
+static constexpr int          TOUCH_CLICK_R = 12;
 
 static void tdeckTouchInit(void) {
     i2c_master_bus_handle_t i2c = tdeckI2cBus();
@@ -117,10 +144,14 @@ static void tdeckTouchInit(void) {
             storageSet("tdeck.touch", tch);   /* surfaced in the T-Deck settings pane */
             /* esp_lcd_touch configured GPIO16 as input; take it interrupt-driven
              * ourselves (ANYEDGE — GT911 INT polarity is sub-rev dependent, and a
-             * redundant edge just costs one empty read). lcdInputISR wakes the lcd
-             * task to read the touch; touchReadCb sustains tracking from there. */
+             * redundant edge just costs one empty read). The edge wakes the poll
+             * task (tdeckTouchIsr), which samples the GT911 and then bumps the lcd
+             * task (lcdTouchPoll) to read the latch — keeping the I2C read off the
+             * render path. Between edges the poll's own cadence sustains tracking.
+             * If the poll task doesn't exist yet (early boot) the ISR no-ops and
+             * the poll's timeout picks the finger up. */
             gpio_set_intr_type((gpio_num_t)BOARD_TOUCH_INT_PIN, GPIO_INTR_ANYEDGE);
-            gpio_isr_handler_add((gpio_num_t)BOARD_TOUCH_INT_PIN, lcdInputISR, nullptr);
+            gpio_isr_handler_add((gpio_num_t)BOARD_TOUCH_INT_PIN, tdeckTouchIsr, nullptr);
             gpio_intr_enable((gpio_num_t)BOARD_TOUCH_INT_PIN);
             s_touch = tp;
             return;
@@ -133,20 +164,70 @@ static void tdeckTouchInit(void) {
     storageSet("tdeck.touch", "not found");
 }
 
-/* lcd_input.h touch_read: pop the GT911's points in NATIVE coords; the lcd
- * component applies the panel rotation. Returns false (no read) until the GT911
- * is up. */
+/* lcd_input.h touch_read (lcd task): return the sample the poll task latched, in
+ * NATIVE coords (the lcd component applies the panel rotation) — no I2C here, so a
+ * touch read never waits on the bus or behind a render. When there is no live
+ * finger but a tap completed unseen (finger down+up during a render stall), replay
+ * its press once; the next read then finds no finger → release → the click lands.
+ * Returns false only before the GT911 is up. */
 static bool tdeckTouchRead(lcd_raw_pt_t* pts, int max, int* count) {
     *count = 0;
+    if (!s_touch) return false;
+    taskENTER_CRITICAL(&s_touchMux);
+    int n = s_tCount;
+    if (n > max) n = max;
+    if (n > 0) {
+        s_gestureConsumed = true;      /* the lcd has now seen this gesture live */
+        for (int i = 0; i < n; i++) { pts[i].x = s_tX[i]; pts[i].y = s_tY[i]; }
+        *count = n;
+    } else if (s_tapPending && max > 0) {
+        s_tapPending = false;          /* one-shot: consume the replayed tap */
+        pts[0].x = s_tapX; pts[0].y = s_tapY;
+        *count = 1;
+    }
+    taskEXIT_CRITICAL(&s_touchMux);
+    return true;
+}
+
+/* Poll task: read the GT911 once, latch the sample, and track the gesture so a
+ * missed tap can be replayed (but a drag never is — see the latch note above).
+ * Returns true when the lcd task should be bumped: a finger-down edge (start
+ * tracking) or a tap to replay. The I2C read is done before the critical section
+ * — esp_lcd_touch blocks on the bus and must not run under the spinlock. */
+static bool tdeckTouchSample(void) {
     if (!s_touch || s_touchAsleep) return false;
     esp_lcd_touch_point_data_t pt[5] = {};
     uint8_t cnt = 0;
     esp_lcd_touch_read_data(s_touch);
-    esp_lcd_touch_get_data(s_touch, pt, &cnt, max < 5 ? (uint8_t)max : 5);
-    int n = cnt > max ? max : cnt;
-    for (int i = 0; i < n; i++) { pts[i].x = (int16_t)pt[i].x; pts[i].y = (int16_t)pt[i].y; }
-    *count = n;
-    return true;
+    esp_lcd_touch_get_data(s_touch, pt, &cnt, 5);
+    int n = cnt > 5 ? 5 : cnt;
+
+    static int16_t downX = 0, downY = 0;
+    static bool    moved = false;
+    bool bump = false;
+
+    taskENTER_CRITICAL(&s_touchMux);
+    s_tCount = n;
+    for (int i = 0; i < n; i++) { s_tX[i] = (int16_t)pt[i].x; s_tY[i] = (int16_t)pt[i].y; }
+    if (n > 0) {
+        if (!s_touchDown) {                 /* finger-down edge: a new gesture */
+            s_touchDown = true; moved = false;
+            downX = s_tX[0]; downY = s_tY[0];
+            s_gestureConsumed = false;
+            bump = true;                     /* wake the lcd task to start tracking */
+        } else if (!moved) {
+            int dx = s_tX[0] - downX, dy = s_tY[0] - downY;
+            if (dx * dx + dy * dy > TOUCH_CLICK_R * TOUCH_CLICK_R) moved = true;
+        }
+    } else if (s_touchDown) {               /* finger-up edge: gesture ended */
+        s_touchDown = false;
+        if (!moved && !s_gestureConsumed) { /* a tap the lcd never saw → replay it */
+            s_tapPending = true; s_tapX = downX; s_tapY = downY;
+            bump = true;
+        }
+    }
+    taskEXIT_CRITICAL(&s_touchMux);
+    return bump;
 }
 
 /* ---- centre / Home button (GPIO 0): click, launcher, standby ----
@@ -187,6 +268,9 @@ static int            s_standbyMs    = 1000;      /* s.tdeck.standby_hold_ms (ad
  *    was sleep-isolated, before pmGpioWakeEnable learned gpio_sleep_sel_dis). */
 static pm_lock_handle_t s_standbyLock = nullptr;
 static bool             s_wakeArmed   = false;   /* LOW_LEVEL wake source live */
+static volatile bool    s_wakePending = false;   /* the wake ISR fired: a press happened, even if the
+                                                  * finger has since lifted (latched so a short press
+                                                  * during the sleep-exit latency still wakes) */
 
 /* First fire of the LOW_LEVEL wake press: silence the pin (see storm note
  * above), then the normal notify. LL register write, not gpio_intr_disable() —
@@ -194,6 +278,8 @@ static bool             s_wakeArmed   = false;   /* LOW_LEVEL wake source live *
  * with ESP_INTR_FLAG_IRAM. */
 static void IRAM_ATTR tdeckStandbyBtnISR(void* arg) {
     gpio_ll_intr_disable(&GPIO, (gpio_num_t)BOARD_HOME_BTN_PIN);
+    s_wakePending = true;   /* a press occurred — latch it so a finger that lifts before
+                             * the lcd task polls (sleep-exit latency) still wakes us */
     lcdInputISR(arg);
 }
 
@@ -204,8 +290,27 @@ static void tdeckWakeArm(void) {
     gpio_isr_handler_remove((gpio_num_t)BOARD_HOME_BTN_PIN);
     gpio_isr_handler_add((gpio_num_t)BOARD_HOME_BTN_PIN, tdeckStandbyBtnISR, nullptr);
     pmGpioWakeEnable(BOARD_HOME_BTN_PIN, GPIO_INTR_LOW_LEVEL);
-    s_wakeArmed = true;
+    s_wakeArmed   = true;
+    s_wakePending = false;   /* fresh arm: drop any stale latch */
     pmLockRelease(s_standbyLock);
+}
+
+/* Light-sleep wake backstop (IDLE-task context, on every light-sleep exit). The
+ * LOW_LEVEL wake source (tdeckStandbyBtnISR) only latches the press if GPIO0 is
+ * still low when the post-wake GPIO interrupt is sampled — but a press bounces,
+ * and the ~1 ms sleep-exit window can land in a bounce-high gap, so the level ISR
+ * never fires and the chip drops straight back to light sleep: the press woke the
+ * chip but was dropped (the "several presses to wake"). Re-check on the wake
+ * itself: if a GPIO wake finds us armed in standby with GPIO0 held low, latch the
+ * press and notify the lcd task directly, independent of the ISR. A real (held)
+ * press keeps GPIO0 low, so the chip re-wakes at once on each sleep attempt and
+ * this catches it within a cycle; a DIO1 radio wake leaves GPIO0 high, ignored. */
+static void tdeckSleepWake(int cause) {
+    if (cause != ESP_SLEEP_WAKEUP_GPIO) return;
+    if (!s_standby || !s_wakeArmed) return;
+    if (gpio_get_level((gpio_num_t)BOARD_HOME_BTN_PIN) != 0) return;   /* GPIO0 high → not the button */
+    s_wakePending = true;
+    lcdInputSignal();
 }
 
 static void tdeckButtonInit(void) {
@@ -219,6 +324,7 @@ static void tdeckButtonInit(void) {
     /* lcdInputISR wakes the lcd task on each edge; tdeckClickRead() (event mode)
      * runs the click/hold state machine from there. */
     gpio_isr_handler_add((gpio_num_t)BOARD_HOME_BTN_PIN, lcdInputISR, nullptr);
+    pmOnLightSleepWake(tdeckSleepWake);    /* backstop the LOW_LEVEL standby wake */
 }
 
 static void cancelHoldTimers(void) {
@@ -270,9 +376,18 @@ static bool tdeckClickRead(void) {
             if (!down) tdeckWakeArm();
             return false;
         }
-        if (down) { storageSet("sys.standby", 0); s_wakeAbsorb = true; }
-        /* Released before we polled (a blip): the wake ISR silenced the pin —
-         * re-arm it or the button goes deaf for the rest of standby. */
+        /* A press occurred — still down, OR the ISR latched one that has since
+         * lifted during the sleep-exit latency. Either wakes: polling only `down`
+         * dropped short presses, so it took several tries to catch one still-down
+         * at poll time. Clearing sys.standby runs tdeckStandby(false), which
+         * restores the awake button config (as the down path already relied on). */
+        if (down || s_wakePending) {
+            s_wakePending = false;
+            storageSet("sys.standby", 0);
+            if (down) s_wakeAbsorb = true;   /* still down: swallow until it lifts */
+        }
+        /* Woken with nothing to act on (an already-consumed blip, or a non-button
+         * wake): the ISR silenced the pin, so re-arm it or the button goes deaf. */
         else gpio_intr_enable((gpio_num_t)BOARD_HOME_BTN_PIN);
         return false;
     }
@@ -509,7 +624,13 @@ void TdeckLcdInput::onStart() {
  * indev. We keep GPIO46 wired anyway: an edge wakes the poll early and is
  * reported by the kbint diagnostic (useful if a future firmware drives it).
  *
- * Dependency is one-way: we call into lcd (lcdRun / lcdInputGroup /
+ * This same task also samples the GT911 touch (tdeckTouchSample): touch and the
+ * keyboard are the only two peripherals on I2C0, so scanning both from one task
+ * off the lcd task removes the read from the render path and removes the bus
+ * contention the two tasks used to have. The touch INT (tdeckTouchIsr) and a
+ * finger-down both shorten the scan cadence for smooth tracking; see below.
+ *
+ * Dependency is one-way: we call into lcd (lcdRun / lcdTouchPoll / lcdInputGroup /
  * lcdSetHasKeyboard); the lcd component has no knowledge of the keyboard. */
 namespace {
 
@@ -520,10 +641,13 @@ lv_indev_t*             s_indev      = nullptr;    /* our keypad indev (lcd task
 bool                    s_again      = false;      /* lcd task: more to drain this cycle */
 volatile uint32_t       s_intCount   = 0;          /* for the kbint diagnostic */
 
-/* Fixed poll period. The C3 holds only the last unread key (no buffer), so any
- * lazy backoff drops keystrokes under fast typing; standby parks the task, so
- * the always-on 30 ms scan costs nothing while the device sleeps. */
-constexpr TickType_t POLL_PERIOD = pdMS_TO_TICKS(30);
+/* Poll periods. The C3 holds only the last unread key (no buffer), so any lazy
+ * backoff drops keystrokes under fast typing; standby parks the task, so the
+ * always-on 30 ms scan costs nothing while the device sleeps. While a finger is
+ * down we scan faster so touch tracking (a drag / scroll) stays smooth — the
+ * component re-reads the latch every 10 ms, so refresh it at a matching rate. */
+constexpr TickType_t POLL_PERIOD  = pdMS_TO_TICKS(30);
+constexpr TickType_t TOUCH_PERIOD = pdMS_TO_TICKS(10);
 
 uint32_t mapAsciiKey(uint32_t b) {
     switch (b) {
@@ -626,10 +750,15 @@ void pollTask(void*) {
          * us with a notify. Park on a clean self-check, not a suspend, so we never
          * stop mid-I2C-transaction holding the shared bus. */
         if (s_standby) { ulTaskNotifyTake(pdTRUE, portMAX_DELAY); continue; }
-        ulTaskNotifyTake(pdTRUE, POLL_PERIOD);  /* woken by the INT, or times out to poll */
+        /* Woken by a touch/keyboard INT, or times out to poll. Faster cadence
+         * while a finger is down so touch tracking stays smooth. */
+        ulTaskNotifyTake(pdTRUE, s_touchDown ? TOUCH_PERIOD : POLL_PERIOD);
         if (s_standby) continue;           /* entered standby during the wait */
-        /* Drain up to a queueful per wake — bounded so a wedged keyboard that
-         * keeps returning a byte can't spin this task. */
+        /* Touch: sample the GT911 and, on a finger-down edge or a tap to replay,
+         * bump the lcd task to read its (event-mode) touch indev. */
+        if (tdeckTouchSample()) lcdTouchPoll();
+        /* Keyboard: drain up to a queueful per wake — bounded so a wedged keyboard
+         * that keeps returning a byte can't spin this task. */
         bool got = false;
         for (int i = 0; i < 16; i++) {
             uint32_t k = i2cReadKey();
@@ -644,6 +773,19 @@ void pollTask(void*) {
 
 }  // namespace
 
+/* GT911 INT (GPIO16, ANYEDGE): just wake the poll task, which does the actual
+ * GT911 read and then bumps the lcd task. No-op until the poll task exists (the
+ * INT is wired during the lcd task's input init, which can precede the poll
+ * task's creation in onInit — an early edge is harmless, the poll's timeout
+ * catches the finger). IRAM: the shared ISR service is installed with
+ * ESP_INTR_FLAG_IRAM. */
+static void IRAM_ATTR tdeckTouchIsr(void*) {
+    if (!s_pollTask) return;
+    BaseType_t hp = pdFALSE;
+    vTaskNotifyGiveFromISR(s_pollTask, &hp);
+    portYIELD_FROM_ISR(hp);
+}
+
 /* sys.standby subscription target (lcd task). The lcd component only flips the
  * key — on the inactivity timeout or our centre button; we decide what the device
  * actually does: display off, GT911 reads gated, keyboard scan parked. Only the
@@ -653,6 +795,11 @@ static void tdeckStandby(bool on) {
     s_standby = on;
     if (on) {
         s_touchAsleep = true;                          /* GT911 reads return nothing */
+        /* Drop any latched finger so a press held at sleep time isn't read stale or
+         * replayed as a tap on wake. The poll task parks itself on its next loop. */
+        taskENTER_CRITICAL(&s_touchMux);
+        s_tCount = 0; s_tapPending = false; s_gestureConsumed = false; s_touchDown = false;
+        taskEXIT_CRITICAL(&s_touchMux);
         lcdScreenSleep();                              /* display off, backlight to 0 */
         /* Hold the CPU out of light sleep only until the LOW_LEVEL wake source
          * is armed — the entry press must lift first (see s_standbyLock). Armed
@@ -709,12 +856,15 @@ void TdeckLcdInput::onInit() {
 
     s_queue = xQueueCreate(16, 1);
     lcdRun(kbCreateIndev);                  /* create the indev on the lcd task */
-    /* Prio 3: one notch above the lcd task (prio 2) so a long synchronous redraw
-     * on it (e.g. a search-box list rebuild) can't starve the poll on core 1 —
-     * the C3 holds only the last unread key, so a stalled poll drops keystrokes.
-     * Not higher: the read takes the shared I2C0 bus (touch, audio codec), and
-     * polling it hard at high prio would inject latency into those. */
-    xTaskCreatePinnedToCore(pollTask, "kbpoll", 3072, nullptr, 3, &s_pollTask, 1);
+    /* Prio 6: one notch above the lcd task (prio 5) so the render can't starve
+     * the poll on core 1 — the C3 holds only the last unread key, so a stalled
+     * poll drops keystrokes, and a late INT-driven read comes back stale/garbled
+     * (phantom keys). This task now owns ALL of I2C0 (keyboard + touch), off the
+     * lcd task, so the two no longer contend for the bus — and outranking the
+     * render is what keeps touch sampling on cadence while the lcd task is busy
+     * (the whole point of moving the read here). The scans are a few short I2C
+     * transactions at 10–30 ms, so preempting the render costs it nothing. */
+    xTaskCreatePinnedToCore(pollTask, "kbpoll", 3072, nullptr, 6, &s_pollTask, 1);
 
     lcdSetHasKeyboard(true);                /* lcd: suppress the on-screen keyboard */
 }
