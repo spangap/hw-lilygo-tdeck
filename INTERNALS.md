@@ -247,10 +247,16 @@ for re-dialling `accel_min`/`max`.
 
 Two extra behaviours:
 
-- **Arrow mode.** If a program claimed the wheel (`lcdScrollwheelArrowsActive`,
-  e.g. the on-device terminal), the raw per-read pulse delta is sent as
-  `LV_KEY_UP/DOWN/LEFT/RIGHT` to the focus group (capped at 4/flick) and the
-  pointer stays put — so it never sticks at a clamped screen edge.
+- **Arrow mode.** Entered when a program claimed the wheel
+  (`lcdScrollwheelArrowsActive`, e.g. the on-device terminal) **or** a text caret
+  is live (`lcdCaretActive` — editing a box). The raw per-read pulse delta is sent
+  as `LV_KEY_UP/DOWN/LEFT/RIGHT` to the focus group (capped at 4/flick) and the
+  pointer stays put — so it never sticks at a clamped screen edge. No timeout: the
+  caret blink is the state. **Walk-out** — 3 quick UPs against the top line while a
+  caret holds — calls `lcdCaretRelease()` and warps the pointer accumulator to the
+  caret, so the ball reappears parked on the text cursor. The ball cursor defaults
+  to always-visible (`s.tdeck.pointer_visible_time` = -1) so it marks where a click
+  lands; arrow mode hides it explicitly.
 - **Edge-pan.** When the cursor is pinned against a screen edge and the ball
   keeps pushing that way, the motion the clamp would swallow becomes a
   `lcdScroll` distance instead — so a touchless deck reaches offscreen content

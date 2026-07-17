@@ -435,6 +435,8 @@ static int               s_tbAccelMax = 18;           /* s.tdeck.trackball_accel
 static int               s_tbSmoothMs = 150;          /* s.tdeck.trackball_smooth_ms: velocity EMA time constant */
 static int64_t           s_tbLastUs = 0;              /* last read time, for velocity */
 static float             s_tbVel = 0.0f;              /* smoothed pulse rate (pulses/sec) */
+static int               s_upCount  = 0;              /* UP pulses toward the caret walk-out */
+static int64_t           s_upFirstUs = 0;             /* start of the current UP window */
 
 /* Acceleration model. Every knob is an s.tdeck.* config key, tunable live over the
  * CLI/browser (no sliders). The per-pulse step ramps linearly from 1 px when the
@@ -483,6 +485,10 @@ static void tdeckTrackballInit(void) {
     NOW_AND_ON_CHANGE("s.tdeck.trackball_accel_max", { s_tbAccelMax = atoi(val); });
     storageDefault("s.tdeck.trackball_smooth_ms", s_tbSmoothMs);
     NOW_AND_ON_CHANGE("s.tdeck.trackball_smooth_ms", { s_tbSmoothMs = atoi(val); });
+    /* Default the ball cursor to always-on so it stays put in ball-cursor mode
+     * (you can see where a click / the text caret sits). Editing hides it
+     * explicitly (arrow mode), so it isn't in the way while typing. -1 = always. */
+    storageDefault("s.tdeck.pointer_visible_time", -1);
     NOW_AND_ON_CHANGE("s.tdeck.pointer_visible_time",
                       { int s = atoi(val); lcdPointerSetVisibleMs(s < 0 ? -1 : s * 1000); });
 }
@@ -506,20 +512,44 @@ static bool tdeckPointerRead(int* x, int* y) {
     int dxp = c[TB_RIGHT] - c[TB_LEFT];     /* signed pulse delta this read */
     int dyp = c[TB_DOWN]  - c[TB_UP];
 
-    /* Arrow-key mode (a program claimed it via lcdProgramScrollwheelArrows, e.g.
-     * the on-device terminal): feed arrows to the focus group instead of moving
-     * the pointer. Uses the raw per-read pulse delta, so it never sticks at a
-     * screen edge the way the clamped pointer position would. */
-    if (lcdScrollwheelArrowsActive()) {
+    /* Arrow-key mode: feed arrows to the focus group instead of moving the
+     * pointer. Two triggers — a program latch (lcdProgramScrollwheelArrows, e.g.
+     * the on-device terminal) or a live text caret (lcdCaretActive: editing a box,
+     * so the ball drives the caret). Uses the raw per-read pulse delta, so it never
+     * sticks at a screen edge the way the clamped pointer position would. */
+    int cx = 0, cy = 0; bool atTop = false;
+    bool caret = lcdCaretActive(&cx, &cy, &atTop);
+    if (lcdScrollwheelArrowsActive() || caret) {
         int n; uint32_t key;
         if (abs(dyp) >= abs(dxp)) { n = abs(dyp); key = dyp > 0 ? LV_KEY_DOWN  : LV_KEY_UP;   }
         else                      { n = abs(dxp); key = dxp > 0 ? LV_KEY_RIGHT : LV_KEY_LEFT; }
         if (n > 4) n = 4;                   /* cap a fast flick */
+
+        /* Walk-out: 3 quick UPs pushed against the top line drop edit mode and put
+         * the ball-cursor back, parked on the caret. Any other motion breaks the
+         * streak. Only while a caret is live (the program latch has no "top"). */
+        if (caret && key == LV_KEY_UP && atTop && n > 0) {
+            int64_t now = esp_timer_get_time();
+            if (s_upCount == 0 || now - s_upFirstUs > 500000) { s_upCount = 0; s_upFirstUs = now; }
+            s_upCount += n;
+            if (s_upCount >= 3) {
+                s_upCount = 0;
+                lcdCaretRelease();
+                s_ptrX = std::clamp(cx, 0, scrW - 1);
+                s_ptrY = std::clamp(cy, 0, scrH - 1);
+                *x = s_ptrX; *y = s_ptrY;
+                return true;                /* moved → cursor glides to the caret */
+            }
+        } else {
+            s_upCount = 0;
+        }
+
         lv_group_t* g = lcdInputGroup();
         for (int i = 0; i < n && g; i++) lv_group_send_data(g, key);
         *x = s_ptrX; *y = s_ptrY;           /* pointer stays put */
         return false;
     }
+    s_upCount = 0;                          /* not editing → no streak */
 
     /* Pointer acceleration. Smooth the pulse rate with a *time-decayed* EMA: a
      * short gap barely moves it (steady feel under a continuous roll), a long gap
