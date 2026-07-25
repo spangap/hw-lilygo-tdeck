@@ -1,5 +1,5 @@
-description: "hw-tdeck: LilyGo T-Deck Plus board HAL for reticulous (power/CS/reset, ST7789 display + GT911 touch + trackball + QWERTY input HAL, GNSS, RTC)."
-url: https://github.com/spangap/hw-tdeck
+description: "hw-lilygo-tdeck: LilyGo T-Deck Plus board HAL for reticulous (power/CS/reset, ST7789 display + GT911 touch + trackball + QWERTY input HAL, GNSS, RTC)."
+url: https://github.com/spangap/hw-lilygo-tdeck
 version: "0.1.0"
 license: "Apache-2.0"
 targets:

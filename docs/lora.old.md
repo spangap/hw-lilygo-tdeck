@@ -19,7 +19,7 @@ see `component-plan.md` §12.
 The LoRa radio pins come from iface-lora's `CONFIG_LORA*` (set in
 [`sdkconfig.defaults`](../sdkconfig.defaults)); the board's own peripheral
 constants live in [`tdeck.h`](../main/tdeck.h). There is no board-select
-Kconfig — hw-tdeck is the T-Deck Plus. T-Deck Plus values:
+Kconfig — hw-lilygo-tdeck is the T-Deck Plus. T-Deck Plus values:
 
 | Define | T-Deck Plus |
 |---|---|

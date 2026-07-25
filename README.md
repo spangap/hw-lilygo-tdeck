@@ -1,6 +1,6 @@
-# hw-tdeck — LilyGo T-Deck Plus board HAL
+# hw-lilygo-tdeck — LilyGo T-Deck Plus board HAL
 
-**hw-tdeck** is the board-support straddle for the **LilyGo T-Deck Plus**
+**hw-lilygo-tdeck** is the board-support straddle for the **LilyGo T-Deck Plus**
 (ESP32-S3FN16R8 — 16 MB flash, 8 MB octal PSRAM; SX1262 LoRa; 2.8" 320×240
 ST7789V LCD; GT911 touch; BlackBerry-style trackball; ESP32-C3 QWERTY keyboard;
 pre-fitted GNSS; microSD). It makes the board usable by an application: it owns
@@ -10,7 +10,7 @@ board's pin map and hardware tuning as Kconfig and storage keys.
 
 It is a **non-buildable** component — it decides nothing about what the device
 *does*. A buildable assembler (`reticulous/reticulous`) adds it and inherits the
-board: `spangap build reticulous/reticulous --with spangap/hw-tdeck`. The
+board: `spangap build reticulous/reticulous --with spangap/hw-lilygo-tdeck`. The
 mesh stack, the IP/web platform, `app_main`, the partition layout, the update
 story and the browser SPA all come from the buildable and its other straddles —
 not from here.

@@ -1,4 +1,4 @@
-# hw-tdeck — internals
+# hw-lilygo-tdeck — internals
 
 Maintainer reference for the LilyGo T-Deck Plus board HAL. The
 [README](README.md) is the operator guide and pin map; this document is for

@@ -1,4 +1,4 @@
-# hw-tdeck board HAL — an ordinary spangap component (no longer a buildable).
+# hw-lilygo-tdeck board HAL — an ordinary spangap component (no longer a buildable).
 #
 # Compiles the LilyGo T-Deck Plus board code: power/CS/reset + the display/
 # touch/trackball/button input HAL + QWERTY keyboard (tdeck.cpp), the GNSS

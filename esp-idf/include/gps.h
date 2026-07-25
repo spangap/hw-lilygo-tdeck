@@ -10,7 +10,7 @@
 #include "service.h"
 
 /** The GNSS receiver as a boot-registered Service: onInit spawns the GPS task
- *  (gated by s.gps.enable). Declared in hw-tdeck straddle.yaml `services:`. */
+ *  (gated by s.gps.enable). Declared in hw-lilygo-tdeck straddle.yaml `services:`. */
 class GpsService : public Service {
 public:
     void onInit() override;

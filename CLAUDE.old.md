@@ -187,7 +187,7 @@ by reset). The board uses native ESP32-S3 USB CDC — no FT2232 / CP210x.
   (lives in rnsd.cpp) — callers go through `rnsdDestOpen()`.
 - `tdeck.h`/`tdeck.cpp` — all T-Deck Plus board support. `BOARD_*` constants for
   the board's bespoke peripherals (input + GNSS); no board-select Kconfig —
-  hw-tdeck is the T-Deck. The display pins are the lcd component's
+  hw-lilygo-tdeck is the T-Deck. The display pins are the lcd component's
   (`CONFIG_LCD_*` in sdkconfig.defaults), the LoRa pins iface-lora's
   (`CONFIG_LORA*`). Plus the driver code: power/CS, and (CONFIG_SPANGAP_LCD) the
   touch/trackball/button input HAL (`lcd_input.h`) and the QWERTY keyboard.

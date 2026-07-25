@@ -1,8 +1,8 @@
-# hw-tdeck — board HAL straddle for the LilyGo T-Deck Plus.
+# hw-lilygo-tdeck — board HAL straddle for the LilyGo T-Deck Plus.
 #
 # A plain (non-buildable) board component: it doesn't decide what the device
 # DOES, it only makes the T-Deck usable by an app. The reticulous/reticulous
-# buildable adds it with `--with spangap/hw-tdeck` and inherits the board's
+# buildable adds it with `--with spangap/hw-lilygo-tdeck` and inherits the board's
 # pin maps, bring-up hooks and hardware kconfig.
 #
 # Owns the T-Deck Plus board HAL (esp-idf/src/tdeck.cpp: power/CS/reset, display/
@@ -10,7 +10,7 @@
 # (gps.cpp) + RTC (rtc.cpp). app_main, partitions, the OTA story and the browser
 # SPA are NOT here — they belong to the buildable.
 schema_version: 1
-name: spangap/hw-tdeck
+name: spangap/hw-lilygo-tdeck
 prefix: tdeck
 firmware: esp-idf
 version: 0.0.0

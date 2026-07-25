@@ -1,6 +1,6 @@
 # License
 
-This repository, **hw-tdeck** (the consumer "buildable straddle" that
+This repository, **hw-lilygo-tdeck** (the consumer "buildable straddle" that
 bundles spangap + reticulous straddles into a flashable T-Deck S3 firmware
 image and a browser SPA), is released under the **Apache License,
 Version 2.0**.
