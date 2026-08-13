@@ -13,6 +13,7 @@
  *   4. The two-phase public API (tdeckStart / tdeckInit).
  */
 #include "tdeck.h"
+#include "i2c_helper.h"     /* SPANGAP_I2C_PULLUP (shared bus wiring policy) */
 #include "log.h"            /* warn (i2c bus init) */
 #include "storage.h"        /* battery.* ephemerals */
 
@@ -114,7 +115,7 @@ i2c_master_bus_handle_t tdeckI2cBus(void) {
     bcfg.scl_io_num                   = (gpio_num_t)BOARD_TOUCH_I2C_SCL;
     bcfg.clk_source                   = I2C_CLK_SRC_DEFAULT;
     bcfg.glitch_ignore_cnt            = 7;
-    bcfg.flags.enable_internal_pullup = true;
+    bcfg.flags.enable_internal_pullup = SPANGAP_I2C_PULLUP;
     if (i2c_new_master_bus(&bcfg, &s_i2c) != ESP_OK) {
         warn("i2c: bus init failed\n");
         s_i2c = nullptr;

@@ -4,7 +4,7 @@
 GNSS receiver, parses every fix it can, and republishes a full snapshot into
 ephemeral `gps.*` every `s.gps.interval` seconds. Autobauds and identifies the
 chip on enable; on disable it commands the receiver into hardware-appropriate
-standby. Pinned to core 0, priority 2, 6 KB PSRAM stack. NMEA-only today (no
+standby. Pinned to core 0, priority 1, 6 KB PSRAM stack. NMEA-only today (no
 UBX/binary parsing).
 
 The task is a pure consumer/producer of storage: frontends (CLI, on-device

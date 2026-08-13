@@ -106,7 +106,7 @@ Re-measure the curve, or trim `BAT_DIV_NUM/DEN`, if a multimeter disagrees.
 
 ## 4. GNSS receiver (`gps.cpp`)
 
-One FreeRTOS task, **core 0, prio 2, 6 KB PSRAM stack**, `itsPoll` as the single
+One FreeRTOS task, **core 0, prio 1, 6 KB PSRAM stack**, `itsPoll` as the single
 wait point. No PPS is routed on the Plus, so there is no interrupt line: the task
 drains the UART on a ≤1 s cadence (the receiver's natural 1 Hz output) and
 publishes a full `gps.*` snapshot every publish period.

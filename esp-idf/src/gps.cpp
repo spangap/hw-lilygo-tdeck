@@ -892,5 +892,5 @@ void GpsService::onInit() {
     }
     cliRegisterCmd("gps", cliGps);
     pmLockCreate(PM_NO_LIGHT_SLEEP, "gps", &s_pmLock);
-    s_task = spawnTask(gpsTaskMain, TAG, 6144, nullptr, 2, 0, STACK_PSRAM);
+    s_task = spawnTask(gpsTaskMain, TAG, 6144, nullptr, 1, 0, STACK_PSRAM);
 }
