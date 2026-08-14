@@ -13,6 +13,9 @@ include(${CMAKE_CURRENT_LIST_DIR}/spangap_requires.cmake)
 idf_component_register(
     SRCS
         "src/tdeck.cpp"
+        # This board's one self-assertion (detect_hw), called by
+        # spangapInit() before any bus is claimed.
+        "src/detect.cpp"
         "src/gps.cpp"
         "src/rtc.cpp"
         # conditional/<name>/ board code, compiled only when <name> is staged

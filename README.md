@@ -56,6 +56,31 @@ are owned by other straddles ([spangap-lcd](../spangap-lcd),
 [iface-lora](../iface-lora), [spangap/audio](../audio)); this board only
 supplies their pins (below) and the input/control glue.
 
+## Board identity (`detect_hw`)
+
+`esp-idf/src/detect.cpp` answers one question about this board: it returns
+`"hw-lilygo-tdeck"` when the hardware under the firmware is this board, and NULL when
+it is not. What it asks:
+
+16 MB flash, then the ESP32-C3 QWERTY keyboard acking on the shared I2C0 bus with
+the peripheral rail up — unique to this board among the ones spangap knows —
+confirmed by the SX1262, since a keyboard alone could be a bare C3 on a bench.
+The rail is released **only** when the probe fails; on a T-Deck the firmware
+wants it up anyway. Touch, the ES7210 codec, the RTC and the GNSS receiver are
+fitted or not on this same straddle, so they identify nothing and are logged for
+the trace rather than tested — and only in flashmon's detector, where the 1.2 s
+per rate the GNSS autobaud costs is affordable.
+
+spangap-core calls it before the first `onStart()` — the last moment no bus is
+claimed — and **halts the device awake** when the answer disagrees with the board
+this image was built for, since every pin map here would then belong to someone
+else's hardware. The confirmed answer is published as `sys.hw` and announced on
+the console as `build: hw hw-lilygo-tdeck`. flashmon's standalone detector carries a
+hand-kept copy of the same function, renamed `detect_hw_lilygo_tdeck`, to identify a chip
+whose firmware is unknown; change one, change the other. See
+[spangap-core/docs/init.md](../spangap-core/docs/init.md) and
+[flashmon/docs/detect.md](../flashmon/docs/detect.md).
+
 ## Hardware & pin map
 
 LilyGo T-Deck Plus — **ESP32-S3FN16R8** (16 MB flash, 8 MB **octal** PSRAM,
