@@ -55,7 +55,7 @@ services:
 # gps.* and s.lcd.* rows are defaultless: those defaults are owned by gps.cpp and
 # spangap-lcd respectively; this pane only surfaces the keys.
 settings:
-  - menu:
+  - at:
       - { id: tdeck, label: "T-Deck" }
     rows:
       - section: "Board"
