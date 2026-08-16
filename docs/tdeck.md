@@ -59,7 +59,8 @@ Under `CONFIG_SPANGAP_LCD` the board registers, as the `lcd` input HAL
   its INT is dead and its read is destructive, so it runs its own poll task +
   keypad indev. lcd knows nothing about it.
 
-**Settings it owns** (root-level "T-Deck" Settings pane): `s.tdeck.trackball_speed`
+**Settings it owns** (the Trackball section of the System Settings page):
+`s.tdeck.trackball_speed`
 (pointer speed 4–40) and `s.tdeck.pointer_visible_time` (cursor dwell seconds,
 `-1` = always). It also surfaces the generic `s.lcd.backlight`.
 
@@ -770,8 +771,8 @@ lcd task and bumps lcd via `lcdRun()`.
   sample had DOWN/RIGHT swapped) — flip `BOARD_TBOX_*` or the `dx/dy` signs in
   [tdeck.h](../main/tdeck.h) / [tdeck.cpp](../main/tdeck.cpp) if it feels
   wrong.
-- **`T-Deck` Settings panel** (root of on-device Settings, registered during
-  `tdeckPreInit`): **Trackball** → Pointer speed (`s.tdeck.trackball_speed`,
+- **The board's sections of the System Settings page**: **Trackball** → Pointer
+  speed (`s.tdeck.trackball_speed`,
   4–40) + Cursor dwell (`s.tdeck.pointer_visible_time`, 1–30 s; `-1`/always stays
   CLI/browser-only); **Display** → Backlight (`s.lcd.backlight`).
 - **Touch tracking** while a finger is down is a 10 ms `lv_timer`, created on

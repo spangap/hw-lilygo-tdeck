@@ -24,7 +24,10 @@
 #include "sdkconfig.h"
 #include "service.h"
 
-#define BOARD_NAME              "T-Deck Plus"
+/* The board's name as a person reads it — published to sys.board at init and
+ * shown in the Hardware section of Settings, so the UI never spells a board
+ * name of its own. */
+#define BOARD_NAME              "LilyGO T-Deck"
 /* Master peripheral power-enable pin. T-Deck (Plus) gates the +3.3 V rail to
  * display, SD, GPS *and* LoRa radio behind GPIO 10. Must be driven HIGH at boot
  * or SPI traffic to the SX1262 is just SPI traffic into a powered-down chip.
@@ -98,6 +101,7 @@
 class TdeckBoard : public Service {
 public:
     void onStart() override;   /* was tdeckStart */
+    void onInit()  override;   /* publishes sys.board once storage is up */
 };
 
 /**

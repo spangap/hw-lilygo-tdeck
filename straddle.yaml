@@ -30,7 +30,8 @@ additional_installs:
 # it constructs these in listed order and walks them (onStart before spangapInit,
 # onInit after). ORDER MATTERS — it reproduces the old start/init bands exactly:
 #   TdeckBoard.onStart (was tdeckStart) — bare-hardware power rail + shared-SPI CS
-#     park; MUST precede spangapInit()'s fs_mount_sd().
+#     park; MUST precede spangapInit()'s fs_mount_sd(). Its onInit publishes
+#     sys.board, which needs storage and so cannot happen in the start band.
 #   TdeckLcdInput (conditional/spangap-lcd/, when spangap-lcd): onStart (was
 #     tdeckLcdStart) registers the input HAL before lcdInit; onInit (was
 #     tdeckLcdInit) brings up the keyboard once the lcd task exists.
@@ -42,7 +43,8 @@ additional_installs:
 #     battery.millivolt / battery.percent. Always on — no UI dependency.
 # The listed order preserves the previous init order (lcd, audio, gps, battery);
 # the when:-gated entries vanish entirely when their straddle isn't staged. TdeckBoard
-# has only an onStart (empty onInit), so it sits out the init walk. No #if anywhere.
+# is first in the init walk too, so sys.board is published before anything reads it.
+# No #if anywhere.
 services:
   - { class: TdeckBoard,    header: tdeck.h }
   - { class: TdeckLcdInput, header: tdeck_lcd.h,   when: spangap/spangap-lcd }
@@ -50,17 +52,35 @@ services:
   - { class: GpsService,    header: gps.h }
   - { class: TdeckBattery,  header: tdeck.h }
 
-# Declarative settings: the "T-Deck" pane + s.tdeck.* defaults are generated from
-# this block (the web panel is generated too — there is no hand-written one).
+# Declarative settings: the board's rows on the System page + the s.tdeck.*
+# defaults are generated from this block (the web panels too — there is no
+# hand-written one). What this board offers is device-wide, not a program, so it
+# lands on System rather than in a menu of its own; the orders put Hardware and
+# Display at the top, ahead of the unordered blocks the platform straddles
+# contribute there, and keep the board's remaining sections together below them.
+# The Display rows join the section spangap-lcd opens — section titles merge on
+# an exact match, so a board states only the panel rows it actually has.
 # gps.* and s.lcd.* rows are defaultless: those defaults are owned by gps.cpp and
-# spangap-lcd respectively; this pane only surfaces the keys.
+# spangap-lcd respectively; this block only surfaces the keys.
 settings:
-  - at:
-      - { id: tdeck, label: "T-Deck" }
+  - at: [ { id: system } ]
+    order: 10
     rows:
-      - section: "Board"
-      - value:  { label: "GPS",   key: "gps.model" }
-      - value:  { label: "Touch", key: "tdeck.touch" }
+      - section: "Hardware"
+      - info:
+          rows:
+            - value:  { label: "Board", key: "sys.board" }
+            - value:  { label: "GPS",   key: "gps.model" }
+            - value:  { label: "Touch", key: "tdeck.touch" }
+  - at: [ { id: system } ]
+    order: 20
+    rows:
+      - section: "Display"
+      - slider: { label: "Backlight",       key: "s.lcd.backlight",          min: 0, max: 255 }
+      - slider: { label: "Sleep after (s)", key: "s.lcd.inactivity_timeout", min: 0, max: 120 }
+  - at: [ { id: system } ]
+    order: 30
+    rows:
       - section: "GPS"
       - switch: { label: "Enable",       key: "s.gps.enable" }
       - slider: { label: "Interval (s)", key: "s.gps.interval", min: 0, max: 10 }
@@ -71,9 +91,6 @@ settings:
       - section: "Centre button"
       - slider: { label: "Launcher hold (ms)", key: "s.tdeck.launcher_hold_ms", min: 0, max: 1000, default: 300 }
       - slider: { label: "Standby hold (ms)",  key: "s.tdeck.standby_hold_ms",  min: 0, max: 1000, default: 1000 }
-      - section: "Display"
-      - slider: { label: "Backlight",       key: "s.lcd.backlight",          min: 0, max: 255 }
-      - slider: { label: "Sleep after (s)", key: "s.lcd.inactivity_timeout", min: 0, max: 120 }
 
 # Board VALUES, fed to the symbols other straddles / IDF DEFINE through the
 # collected staging/sdkconfig.spangap-fragments. A board straddle is non-

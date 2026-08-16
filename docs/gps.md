@@ -159,13 +159,13 @@ UART, then drops the UART:
 
 ## On-device settings (`CONFIG_SPANGAP_LCD`)
 
-GPS is surfaced in the board's own **T-Deck** Settings pane
-([`tdeck.cpp`](../main/tdeck.cpp) `tdeckSettingsPane`), not a pane of its own:
+GPS is surfaced among the board's own sections of the **System** Settings page
+(generated from `straddle.yaml`), not a menu of its own:
 
-- **Board** section (top): `GPS` shows `gps.model` (which receiver was found, or
-  its disabled/standby state) and `Touch` shows `tdeck.touch` — the result of
-  the GT911 I²C probe (`GT911 @ 0x5D` or `not found`), published by
-  `tdeckTouchInit`.
+- **Hardware** section (top): `Board` shows `sys.board`, `GPS` shows `gps.model`
+  (which receiver was found, or its disabled/standby state) and `Touch` shows
+  `tdeck.touch` — the result of the GT911 I²C probe (`GT911 @ 0x5D` or
+  `not found`), published by `tdeckTouchInit`.
 - **GPS** section: `Enable` (→ `s.gps.enable`), `Interval (s)` slider
   (→ `s.gps.interval`, 0–10, where 0 = continuous and 1–10 = PSMCT period), and
   `Status` (→ `gps.state`, where the "power-cycle to wake" message appears).
@@ -184,5 +184,5 @@ AGPS seed; the receiver itself can't ingest BSSIDs).
 
 - [`main/gps.cpp`](../main/gps.cpp) / [`main/gps.h`](../main/gps.h) — the task.
 - [`main/tdeck.h`](../main/tdeck.h) — `BOARD_GPS_*` pin constants.
-- [`main/tdeck.cpp`](../main/tdeck.cpp) — T-Deck Settings pane (GPS + touch), `tdeck.touch` publish.
+- [`main/tdeck.cpp`](../main/tdeck.cpp) — `sys.board` publish; `tdeck.touch` publish.
 - [`main/main.cpp`](../main/main.cpp) — `gpsInit()`.

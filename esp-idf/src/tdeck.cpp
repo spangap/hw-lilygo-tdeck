@@ -263,3 +263,11 @@ void TdeckBoard::onStart() {
      * lazily and could otherwise race i2c_new_master_bus() on the same port. */
     tdeckI2cBus();
 }
+
+/* onInit — the board says what it is, once storage exists to say it into. Every
+ * surface that names the hardware (the Hardware section of Settings, on both
+ * the display and the browser) reads this key, so a board is identified in one
+ * place rather than by each surface knowing which board it is running on. */
+void TdeckBoard::onInit() {
+    storageSet("sys.board", BOARD_NAME);
+}

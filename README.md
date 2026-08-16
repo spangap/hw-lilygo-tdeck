@@ -134,9 +134,10 @@ SMA bulkhead. The WiFi/BT antenna is always the module's PCB trace.
 ## Storage variables
 
 Settings live under `s.tdeck.*` and `s.gps.*` (writable by the user / browser /
-CLI; the **T-Deck** settings pane is generated from `straddle.yaml`'s
-`settings:` block). Runtime telemetry is published under bare namespaces for
-anything to observe. All values below are verified against the source.
+CLI; the board's **Hardware**, **Display**, **GPS**, **Trackball** and **Centre
+button** sections of the **System** settings page are generated from
+`straddle.yaml`'s `settings:` block). Runtime telemetry is published under bare
+namespaces for anything to observe. All values below are verified against the source.
 
 ### Settings — trackball & pointer (`s.tdeck.*`, live)
 
@@ -167,6 +168,7 @@ anything to observe. All values below are verified against the source.
 
 | Key | Meaning |
 |---|---|
+| `sys.board` | the board's name for a reader (`BOARD_NAME`), shown in Settings → System → Hardware |
 | `battery.millivolt` | true VBAT in mV (pin reading × 2, EMA-smoothed) |
 | `battery.percent` | 0–100 via the measured discharge curve |
 | `tdeck.touch` | GT911 probe result string (`GT911 @ 0x5D` / `not found`) |
@@ -193,9 +195,9 @@ path drives the ephemeral `sys.standby` key, which the input HAL subscribes to.
 
 ### Surfaced but owned elsewhere
 
-The **T-Deck** settings pane also shows `s.lcd.backlight` and
-`s.lcd.inactivity_timeout` (owned by [spangap-lcd](../spangap-lcd)) — this pane
-only surfaces them. Runtime LoRa parameters live at `s.lora.*`
+The board adds `s.lcd.backlight` and `s.lcd.inactivity_timeout` (owned by
+[spangap-lcd](../spangap-lcd)) to the **Display** section that straddle opens —
+this block only surfaces them. Runtime LoRa parameters live at `s.lora.*`
 ([iface-lora](../iface-lora)).
 
 ## CLI
