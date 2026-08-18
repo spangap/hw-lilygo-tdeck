@@ -48,16 +48,26 @@ extern "C" const char* detect_hw(void)
     vTaskDelay(pdMS_TO_TICKS(150));            /* 3.3 V rail settle */
 
     /* Anchor: the ESP32-C3 QWERTY keyboard. Unique to this board among the ones
-     * spangap knows, and a plain ACK is all it offers — it has no ID register. */
-    if (!detect_ack(BOARD_TOUCH_I2C_SDA, BOARD_TOUCH_I2C_SCL, BOARD_KB_ADDR)) {
-        detect_dbg("no keyboard at 0x%02X — not a T-Deck", BOARD_KB_ADDR);
+     * spangap knows, and a plain ACK is all it offers — it has no ID register.
+     * POLLED, not probed once: the keyboard is its own MCU booting its own
+     * firmware off this rail, and from a cold rail it takes several hundred ms
+     * to reach its I2C loop — one ACK attempt at 150 ms reads a healthy board
+     * as absent. A warm board still answers on the first try. */
+    bool kb = false;
+    for (int i = 0; i < 12; i++) {
+        if ((kb = detect_ack(BOARD_TOUCH_I2C_SDA, BOARD_TOUCH_I2C_SCL, BOARD_KB_ADDR)))
+            break;
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    if (!kb) {
+        detect_miss("no keyboard at 0x%02X — not a T-Deck", BOARD_KB_ADDR);
         detect_rail_release(BOARD_POWER_EN_PIN);
         return NULL;
     }
     /* Confirm with the radio: a keyboard alone could be a bare C3 on a bench. */
     if (!detect_radio(DETECT_LORA_SCK, DETECT_LORA_MOSI, DETECT_LORA_MISO,
                       DETECT_LORA_CS, DETECT_LORA_RST, DETECT_LORA_BUSY, NULL)) {
-        detect_dbg("keyboard answered but no radio — not a T-Deck");
+        detect_miss("keyboard answered but no radio — not a T-Deck");
         detect_rail_release(BOARD_POWER_EN_PIN);
         return NULL;
     }

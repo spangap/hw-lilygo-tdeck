@@ -149,12 +149,17 @@ namespaces for anything to observe. All values below are verified against the so
 | `s.tdeck.trackball_smooth_ms` | `150` | time constant of the pulse-rate EMA |
 | `s.tdeck.pointer_visible_time` | `2` | cursor dwell, seconds after activity; `-1` = always on |
 
-### Settings — centre button (`s.tdeck.*`, live)
+### Centre button
 
-| Key | Default | Meaning |
-|---|---|---|
-| `s.tdeck.launcher_hold_ms` | `300` | hold to go Home (launcher) |
-| `s.tdeck.standby_hold_ms` | `1000` | *additional* hold past Home to enter standby |
+One hold and three click counts: hold 300 ms to sleep the device, one click
+clicks, two go to the launcher, three raise the running-app switcher. The two
+navigation counts work from anywhere, including inside an app — and on a sleeping
+device, where the waking press counts as the first click, so a double or triple
+click wakes and navigates in one gesture. (A single click on a sleeping device
+just wakes it.) A further click extends the burst if it lands within 250 ms of
+the last.
+
+Neither timing is a setting — they are reflexes, not preferences.
 
 ### Settings — GNSS (`s.gps.*`)
 

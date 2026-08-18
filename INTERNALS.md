@@ -216,10 +216,17 @@ flag LoRa's DIO1 path uses) so the IRAM-safe ISR survives cache-disabled windows
 macro uses out-of-order designated initializers — a hard error in C++). The
 controller **latches its I2C address from the INT level at power-on** (low →
 0x5D, high → 0x14); the T-Deck has no touch reset, so the address is
-sub-revision dependent — the code probes both. Probing the wrong address makes
-`esp_lcd_touch_gt911` and the I2C IO log a failed read at ERROR; those two tags
-are muted across the probe and restored after. The result string is published to
-`tdeck.touch`. Touch is left at IDENTITY (native coords) — the LCD component
+sub-revision dependent — the code probes both. The result string is published to
+`tdeck.touch`.
+
+A failing GT911 read logs three lines for one event — the driver's, the I2C IO's,
+and `tdeckTouchSample`'s own `warn()`, which is the one that names the error.
+`tdeckTouchInit` drops the other two with two `logRule()` prefixes
+(`esp_lcd_touch_gt911_read_data`, `panel_io_i2c_rx_buffer`), registered before the
+probe so they cover it too: reading the address the board did *not* latch fails in
+exactly that way before the real one answers. Prefixes, not tag levels —
+everything else those two components have to say still comes through at whatever
+the log settings ask for. Touch is left at IDENTITY (native coords) — the LCD component
 applies the same `CONFIG_LCD_ROTATION` to the points as to the pixels — so
 `tdeckTouchRead` returns raw native points and the maxes are
 `CONFIG_LCD_NATIVE_WIDTH/HEIGHT`. The INT is taken `ANYEDGE` (polarity is
@@ -269,19 +276,43 @@ dwell is pushed in via `lcdPointerSetVisibleMs` from `s.tdeck.pointer_visible_ti
 ### 5.3 Centre / Home button & standby
 
 GPIO 0 (BOOT-strap, also the trackball centre-press, also the unused mic) is read
-pulled-up active-low. The board owns the timing and the four meanings of a press,
+pulled-up active-low. The board owns the timing and the five meanings of a press,
 driven by two one-shot `lv_timer`s on the LCD task:
 
-- tap (< `launcher_hold`) → a pointer click (asserted for exactly one poll);
-- hold `s.tdeck.launcher_hold_ms` → `lcdGoHome`;
-- hold `launcher_hold + s.tdeck.standby_hold_ms` → set `sys.standby = 1`;
-- any press while in standby → clear `sys.standby` (wake), absorbed.
+- hold 300 ms → set `sys.standby = 1`;
+- one click → a pointer click (asserted for exactly one poll);
+- two clicks → `lcdGoHome`;
+- three clicks → `lcdShowRecents`;
+- any press while in standby → clear `sys.standby` (wake); the press still counts
+  as the burst's first click.
 
-The two holds stack (Home first, then standby). When the press starts already at
-the launcher (`lcdAtLauncher`), the Home tier is a no-op so standby comes at the
-shorter `launcher_hold` instead. After a transition the rest of the press is
-swallowed (`s_wakeAbsorb`) until the finger lifts, so a held finger can't wake
-the device it just slept.
+A hold has one tier and one meaning: sleep. Navigation is by click count instead,
+so it reads the same from the launcher, an app, or the switcher — the button asks
+nothing about what is on screen.
+
+Clicks accumulate while releases keep landing within 250 ms of each other, and
+the burst is dispatched when that window closes: a press cancels
+the pending window, a release restarts it. So a plain click costs one window of
+latency — the price of a second click meaning something else — and three, being
+the maximum, dispatches on its own release without waiting. The dispatched single
+click is handed back through `click_read` (`s_clickAssert` + `lcdInputSignal()` to
+make the LCD task poll the indev), which is what keeps *all* click policy on the
+board side of the `lcd_input.h` contract.
+
+After a transition the rest of the press is swallowed (`s_wakeAbsorb`) until the
+finger lifts, so a held finger can't wake the device it just slept.
+
+**Waking counts as a click.** The press that clears `sys.standby` opens a burst
+(`beginWakeBurst`) rather than being discarded, so two or three clicks on a
+sleeping device wake it *and* reach the launcher or the switcher — the gesture
+means the same whether the screen was on or off. The burst is marked
+(`s_wokeBurst`), and its one-click case dispatches nothing: that press meant
+"wake", and a click at the cursor is not what the first touch of a sleeping
+device should do. Which release opens the burst depends on how the wake was seen:
+the still-down path opens it when the finger lifts, the ISR-latched path (the
+press already lifted during the sleep-exit latency) has no release left to wait
+for and opens it at once. `beginWakeBurst` is idempotent so the two can't both
+restart the count.
 
 Standby is **not** done by the button — the button (and the LCD inactivity
 timeout) only flip the ephemeral `sys.standby` key; `tdeckStandby` (subscribed on
@@ -374,7 +405,8 @@ four hardware mics only one is populated on the board (the rest are unconnected)
   [spangap-core memory internals](../spangap-core/docs/memory-internals.md).
 - **GT911 address is INT-level-latched, with no reset to force it.** Always probe
   both 0x5D and 0x14; never hardcode. The wrong-address ERROR logs during the
-  probe are expected, not a fault.
+  probe are expected, not a fault — which is why the library tags are muted and
+  the board reports touch failures itself, in one line.
 - **Trackball direction→pin and ball orientation are sub-revision dependent** (a
   sample had DOWN/RIGHT swapped). Flip `BOARD_TBOX_*` or the `dx/dy` signs if
   motion feels wrong — it is not a code bug.

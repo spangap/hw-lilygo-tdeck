@@ -51,10 +51,11 @@
 
 /* Home / centre button: GPIO 0 (the BOOT-strap pin, also the trackball
  * centre-press; shared with the mic, which reticulous never uses). Read as a
- * pulled-up active-low input after boot — tdeck_lcd.cpp gives it four meanings: a
- * short press is a click, a launcher_hold-ms hold goes Home (lcdGoHome), holding on
- * to launcher_hold+standby_hold ms enters standby, and a press while in standby
- * wakes the device. Hold thresholds are s.tdeck.*_hold_ms. */
+ * pulled-up active-low input after boot — tdeck_lcd.cpp gives it five meanings: a
+ * standby_hold-ms hold enters standby, one click is a click, two clicks go Home
+ * (lcdGoHome), three raise the app switcher (lcdShowRecents), and a press while in
+ * standby wakes the device. Timings are s.tdeck.standby_hold_ms and
+ * s.tdeck.multiclick_ms. */
 #define BOARD_HOME_BTN_PIN      0
 
 /* BlackBerry-style optical trackball: four direction lines, each pulsing
