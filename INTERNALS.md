@@ -15,15 +15,18 @@ Source layout:
 esp-idf/
 ├── CMakeLists.txt           component registration (+ SPANGAP_CONDITIONAL_SRCS glob)
 ├── idf_component.yml         deps: idf >=5.5, esp_lcd_touch_gt911
-├── include/{tdeck,gps,rtc}.h public board API + BOARD_* pin macros
+├── include/tdeck.h           public board API + BOARD_* pin macros
 ├── src/
 │   ├── tdeck.cpp             power rail + CS park, shared I2C0, battery monitor
-│   ├── gps.cpp               GNSS receiver task + clock discipline
-│   └── rtc.cpp               PCF8563 RTC driver (pure HW shim)
+│   └── detect.cpp            board self-assertion (detect_hw)
 └── conditional/
     ├── spangap-lcd/src/tdeck_lcd.cpp   input HAL: touch, trackball, button, keyboard
     └── audio/src/tdeck_audio.cpp       ES7210 mic codec register shim
 ```
+
+The GNSS receiver is the generic [gps](../gps) straddle (staged
+from `additional_installs:`, pins supplied as `CONFIG_GPS_*` in `kconfig:`);
+the PCF8563 RTC is [spangap-rtc](../spangap-rtc), which no board stages today.
 
 The `conditional/<straddle>/` directories are compiled **only** when that
 straddle is staged (the build globs them into `SPANGAP_CONDITIONAL_SRCS`), so
@@ -33,10 +36,8 @@ only on an LCD build, `tdeck_audio.cpp` only on an audio build.
 Everything here is new (a board contributes hardware, not protocol). The subsystems:
 
 - **Peripheral power rail + shared-SPI CS park** (`tdeckStart`/`tdeckPowerInit`).
-- **Shared I2C0 master bus** (`tdeckI2cBus`) — keyboard, touch, RTC, audio codec.
+- **Shared I2C0 master bus** (`tdeckI2cBus`) — keyboard, touch, audio codec.
 - **Battery monitor** (`tdeckBatteryInit`) — ADC + curve + 1/min timer.
-- **GNSS receiver task** (`gpsInit`) — autobaud, NMEA parse, clock discipline.
-- **PCF8563 RTC driver** (`rtcRead`/`rtcWrite`/`rtcProbe`) — optional clock keeper.
 - **On-device input HAL** (`tdeckLcdStart`/`tdeckLcdInit`) — touch, trackball
   pointer, centre button, QWERTY keyboard.
 - **ES7210 mic codec shim** (`tdeckAudioInit`) — I2C register programming for the
@@ -51,9 +52,11 @@ start:  tdeckStart            (always)
         tdeckLcdStart         (when spangap-lcd)
 init:   tdeckLcdInit          (when spangap-lcd)
         tdeckAudioInit        (when spangap/audio)
-        gpsInit               (always)
         tdeckBatteryInit      (always)
 ```
+
+(The GNSS task is gps's own `GpsService`, registered at that straddle's
+init_order position.)
 
 **`tdeckStart` is the only `start:`-band board hook that must run before
 `spangapInit()`.** The first shared-SPI-bus transaction is `fs_mount_sd()`
@@ -72,10 +75,9 @@ already true:
    `loraInit()` (which would own its CS) runs long after the SD probe.
 
 `tdeckStart` also creates the shared **I2C0** bus eagerly, while still
-single-threaded, so the touch (LCD task), keyboard (poll task) and RTC (GNSS
+single-threaded, so the touch (LCD task), keyboard (poll task) and codec (audio
 task) can't race `i2c_new_master_bus()` on the same port. `tdeckI2cBus()` is
-otherwise lazy / first-caller-wins and is always compiled (the RTC needs it even
-on a headless build).
+otherwise lazy / first-caller-wins.
 
 `tdeckLcdStart` registers the input HAL with the LCD component **before**
 `lcdInit()` runs inside `spangapInit()`, so the component can wire touch /
@@ -104,98 +106,7 @@ voltage scaled 0–255 across `[BAT_MIN_MV=3040, BAT_MAX_MV=4260]`), monotonic
 non-increasing — the first entry ≤ the scaled reading gives the percent.
 Re-measure the curve, or trim `BAT_DIV_NUM/DEN`, if a multimeter disagrees.
 
-## 4. GNSS receiver (`gps.cpp`)
-
-One FreeRTOS task, **core 0, prio 1, 6 KB PSRAM stack**, `itsPoll` as the single
-wait point. No PPS is routed on the Plus, so there is no interrupt line: the task
-drains the UART on a ≤1 s cadence (the receiver's natural 1 Hz output) and
-publishes a full `gps.*` snapshot every publish period.
-
-**Two receivers, batch-dependent**, nothing host-visible to tell them apart:
-Quectel **L76K** (default 9600) or u-blox **MIA-M10Q** (default 38400), both
-NMEA 8N1 on UART1. On enable the task **autobauds** — tries 38400 then 9600,
-locks on the first checksum-valid recognized NMEA sentence, and infers the model
-from the baud that worked. This is the LilyGo batch distinguisher, not a true
-probe; a receiver reconfigured off its default baud would be mis-identified
-(out of scope). Each candidate sends a `0xFF` wake edge first, so a u-blox in
-software backup is revived within the 1.5 s listen window.
-
-**Parse.** `nmeaApply` folds RMC / GGA / GSA / GSV / VTG into a working `GpsFix`,
-matching the last 3 chars of the talker token so any GP/GN/GL/GA/GB prefix works.
-`gps.sats_view` is summed across constellations — each talker's in-view count
-counted once (on its first GSV) and zeroed per epoch in `drainUart`; `gps.snr` is
-the best C/N0 this epoch, not a running max.
-
-**Fix cadence / power.** On the u-blox M10, `s.gps.interval` drives the receiver
-itself via one `UBX-CFG-VALSET`: `CFG-RATE-MEAS` to the period and
-`CFG-PM-OPERATEMODE` to `FULL` (interval 0) or `PSMCT` (1–10) — the chip
-low-power-tracks between fixes. `OPERATEMODE` goes last in the VALSET because
-u-blox requires it set after its dependent keys. The L76K speaks no UBX PSM, so
-for it the interval is only a publish throttle. Settings are written to the RAM
-layer and re-sent on every (re-)enable and on a live interval change.
-
-**Standby (on disable).** The shared rail can't be cut, so the task commands the
-chip into its deepest UART-reachable state, then drops the UART:
-
-- **u-blox M10** — `UBX-RXM-PMREQ` software backup (`backup|force`, wakeup
-  `uartrx`). Real low power, wakes on a UART RX edge → re-enable revives it
-  automatically.
-- **L76K** — `$PMTK225,4` deep backup. The `$PCAS` set has no UART-wakeable
-  standby (its low-power is a FORCE pin not routed on the Plus), so this is a
-  one-way trip: the task sets `s_needsPowerCycle`, and on re-enable publishes
-  `gps.state = power-cycle to wake` instead of fumbling the serial. A reboot
-  clears the flag (fresh power = fresh chip).
-
-### 4.1 Clock discipline
-
-Unless `s.gps.ignore_clock` is set, GPS is a clock authority. The model:
-
-- While the system clock is **invalid** (< `kValidEpoch` = 2025-01-01) the task
-  accepts *any* valid GPS date+time — no satellites/position required, since the
-  receiver streams time before it locks. Once valid it re-disciplines only from a
-  real positioned fix.
-- True UTC now = fix epoch + the NMEA sub-second field + a static per-model
-  **pipeline lag** (70 ms u-blox @ 38400, 260 ms L76K @ 9600 — no PPS to measure
-  it) + the time elapsed since the sentence was parsed. `settimeofday` steps only
-  when the residual is ≥ `kStepThreshUs` (250 ms — below that is serial jitter),
-  always stepping a still-invalid clock. `newlib` ships no `timegm`, so
-  `utcToEpoch` converts directly (Howard Hinnant days-from-civil).
-- Ownership is published as `sys.time.ext` (1 = a local authority owns the
-  clock); NTP subscribes and parks SNTP while set. Going through storage keeps
-  GPS free of any compile-time dependency on net — with no net staged there is
-  simply no subscriber. GPS holds ownership while the clock is valid *and* GPS
-  time was seen within the staleness window, then hands it back: **3 days** with
-  an RTC to hold time, but only **1 hour** without one (the RC-oscillator clock
-  drifts hard). `clockOwnershipReconcile` mirrors the last decision to write only
-  on change.
-- `logTimeUpdate` scales the log level to the correction magnitude
-  (< 100 ms verbose, < 5 s debug, < 60 s info, else warn).
-
-### 4.2 RTC keeper
-
-`rtcBootSync` (first thing on the task) probes the PCF8563 once and remembers
-absence — the **stock T-Deck has no RTC** (I2C0 carries only keyboard 0x55 and
-touch 0x5D), so absence is the normal case: it is noted once at info and I2C is
-never touched for the RTC again (no per-minute probes, no per-fix writes). The
-driver stays wired so an external PCF8563 on the Grove I2C — or a board rev that
-adds one — is picked up automatically. If present and trustworthy and the system
-clock is unset, its time is adopted at boot; every GPS step is mirrored to it;
-and once a minute with no recent GPS coverage `gpsHeartbeat` re-syncs the system
-clock from it (whole-second; steps only for ≥1 s drift).
-
-### 4.3 PCF8563 driver (`rtc.cpp`)
-
-A thin BCD↔`struct tm` shim over the on-board PCF8563 (I2C0 @ 0x51, 100 kHz,
-time registers auto-increment from 0x02), sharing the bus via `tdeckI2cBus()`.
-Time is always UTC and always century 2000–2099 — the century bit is written 0
-and masked on read, sidestepping the PCF8563 century-bit polarity confusion (it
-only matters past 2099). The chip's **VL** (voltage-low) flag latches whenever
-the oscillator may have stopped; `rtcRead` surfaces it as `clockValid == false`
-so callers never trust a clock that lost time, and `rtcWrite` clears it.
-`rtcWrite` refuses years outside 2000–2099 rather than write a wrapped year.
-`gps.cpp` owns all policy; this module is pure hardware.
-
-## 5. On-device input HAL (`conditional/spangap-lcd/tdeck_lcd.cpp`)
+## 4. On-device input HAL (`conditional/spangap-lcd/tdeck_lcd.cpp`)
 
 This file exists only on an LCD build. It registers the board's `lcd_input_t`
 ops (`init`, `touch_read`, `pointer_read`, `click_read`) with the LCD component
@@ -210,7 +121,7 @@ component's exported `lcdInputISR` to each INT line; the ISR only flags +
 is ~0 %. The shared GPIO ISR service is installed `ESP_INTR_FLAG_IRAM` (the same
 flag LoRa's DIO1 path uses) so the IRAM-safe ISR survives cache-disabled windows.
 
-### 5.1 GT911 touch
+### 4.1 GT911 touch
 
 `tdeckTouchInit` builds the `esp_lcd_touch` handle by hand (the GT911 CONFIG
 macro uses out-of-order designated initializers — a hard error in C++). The
@@ -231,10 +142,11 @@ applies the same `CONFIG_LCD_ROTATION` to the points as to the pixels — so
 `tdeckTouchRead` returns raw native points and the maxes are
 `CONFIG_LCD_NATIVE_WIDTH/HEIGHT`. The INT is taken `ANYEDGE` (polarity is
 sub-rev dependent; a redundant edge costs one empty read). A consumer can set the
-runtime `tdeck.multi_touch` key to flip the GT911 (a 5-point controller) into
-multipoint mode via `lcdTouchSetMultipoint`.
+runtime `lcd.multi_touch` key to flip the GT911 (a 5-point controller) into
+multipoint mode — the subscription lives in spangap-lcd (`lcd_touch.cpp`), not
+here.
 
-### 5.2 Trackball → pointer
+### 4.2 Trackball → pointer
 
 Four direction lines pulse active-low; four `NEGEDGE` ISRs just count under a
 spinlock (`s_tbMux`) shared with the reader. `tdeckPointerRead` integrates the
@@ -273,7 +185,7 @@ reticulous owns the whole pointing device; spangap-lcd stays generic (it draws
 the cursor and knows the `pointer_read` hook, owns no pointer config). Cursor
 dwell is pushed in via `lcdPointerSetVisibleMs` from `s.tdeck.pointer_visible_time`.
 
-### 5.3 Centre / Home button & standby
+### 4.3 Centre / Home button & standby
 
 GPIO 0 (BOOT-strap, also the trackball centre-press, also the unused mic) is read
 pulled-up active-low. The board owns the timing and the five meanings of a press,
@@ -320,7 +232,7 @@ the LCD task) is what actually sleeps/wakes: GT911 reads gated off
 (`s_touchAsleep`), display off via `lcdScreenSleep/Wake`, and the keyboard poll
 task parked. Only the centre button stays live to wake.
 
-### 5.4 QWERTY keyboard
+### 4.4 QWERTY keyboard
 
 The keyboard is an ESP32-C3 MCU on I2C0 @ 0x55. It is a poor fit for the generic
 indev model, so it lives in the consumer, not spangap-core:
@@ -353,7 +265,7 @@ The `readCb` synthesizes press+release over two reads and decodes a `0x0C` prefi
 window) for the terminal. A keystroke that woke the screen is swallowed (it only
 served to wake).
 
-## 6. ES7210 mic codec shim (`conditional/audio/tdeck_audio.cpp`)
+## 5. ES7210 mic codec shim (`conditional/audio/tdeck_audio.cpp`)
 
 Compiled only on an audio build. The [spangap/audio](../audio) engine owns the
 I2S read/write engine; a board contributes Kconfig pins plus, for an
@@ -368,7 +280,7 @@ audio task applies them lazily on first capture. The register table configures
 16-bit I2S-slave, all four mics at a fixed gain (regs 0x43–0x46), HPF on. Of the
 four hardware mics only one is populated on the board (the rest are unconnected).
 
-## 7. Pitfalls
+## 6. Pitfalls
 
 - **`tdeckStart` before `spangapInit()`.** Power rail + CS park must precede the
   SD mount; this is the whole reason for the `start:` band. Don't reorder it into
@@ -413,12 +325,6 @@ four hardware mics only one is populated on the board (the rest are unconnected)
 - **The keyboard INT is dead on current firmware** — don't build an INT-only read
   path. The poll path is load-bearing; the self-healing edge detection is the
   only thing that would ever switch it off.
-- **No RTC on a stock T-Deck.** Don't add per-minute RTC probes on the assumption
-  one exists — `rtcBootSync` deliberately probes once and goes quiet. The driver
-  is for an *external* PCF8563 (Grove I2C) or a board rev that adds one.
 - **Battery divider is 2.0, not 2.11.** The ADC is curve-fit calibrated, so the
   true divider ratio applies; 2.11 is Meshtastic's compensation for an
   *uncalibrated* ADC and would over-read here.
-- **GPS clock ownership is published, not called.** GPS never links net; it
-  claims/releases the clock through `sys.time.ext` on the storage bus. If you add
-  a clock consumer, subscribe to that key — don't add a direct dependency.

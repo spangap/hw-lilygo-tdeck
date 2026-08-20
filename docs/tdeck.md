@@ -21,11 +21,12 @@ T-Deck-specific that the platform layer stays generic about.
 **Public surface (`tdeck.h`).** Two things:
 
 1. **The board pin map** — compile-time `BOARD_*` constants for the board's
-   bespoke peripherals (touch / trackball / keyboard / centre button; GNSS; the
-   peripheral power-enable pin), consumed by `tdeck.cpp` and `gps.cpp`. There is
-   no board-select Kconfig — hw-lilygo-tdeck is the T-Deck. The **display** pins live in
+   bespoke peripherals (touch / trackball / keyboard / centre button; the
+   peripheral power-enable pin), consumed by `tdeck.cpp`. There is no
+   board-select Kconfig — hw-lilygo-tdeck is the T-Deck. The **display** pins live in
    the lcd component's `CONFIG_LCD_*` (sdkconfig.defaults); the **LoRa** pins in
-   iface-lora's `CONFIG_LORA*`.
+   iface-lora's `CONFIG_LORA*`; the **GNSS** pins in gps's
+   `CONFIG_GPS_*` (straddle.yaml `kconfig:`).
 2. **The bring-up API** — `tdeckPreInit()` and `tdeckPostInit()`.
 
 **Two-phase init (why it isn't one call).** Bring-up straddles `spangapInit()`:

@@ -38,6 +38,10 @@
 #define DETECT_LORA_RST   17
 #define DETECT_LORA_BUSY  13
 
+/* GNSS RX. Lives in straddle.yaml as CONFIG_GPS_RX_PIN for the same reason —
+ * the symbol only exists when gps is staged. */
+#define DETECT_GPS_RX     44
+
 extern "C" const char* detect_hw(void)
 {
     /* 16 MB flash or it is not a T-Deck Plus — cheapest possible rejection, and
@@ -81,7 +85,7 @@ extern "C" const char* detect_hw(void)
     detect_gt911(BOARD_TOUCH_I2C_SDA, BOARD_TOUCH_I2C_SCL);
     detect_es7210(BOARD_TOUCH_I2C_SDA, BOARD_TOUCH_I2C_SCL);
     detect_ack(BOARD_TOUCH_I2C_SDA, BOARD_TOUCH_I2C_SCL, 0x51);      /* PCF8563 RTC */
-    detect_gps(BOARD_GPS_RX_PIN, NULL);
+    detect_gps(DETECT_GPS_RX, NULL);
 #endif
 
     detect_found("hw_lilygo_tdeck");

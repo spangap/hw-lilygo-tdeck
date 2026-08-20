@@ -100,12 +100,11 @@ static void tdeckPowerInit(void)
 /* =========================================================================
  * 1b. Shared I2C0 master bus
  *
- * Always compiled (not LCD-gated): the GT911 touch and QWERTY keyboard live
- * here only with CONFIG_SPANGAP_LCD, but the PCF8563 RTC (gps.cpp, 0x51) shares
- * the same bus on a headless build too. Created once; first caller wins.
+ * Home to the GT911 touch and QWERTY keyboard (conditional/spangap-lcd/) and
+ * the ES7210 codec (conditional/audio/). Created once; first caller wins.
  * ========================================================================= */
 
-static i2c_master_bus_handle_t s_i2c = nullptr;   /* shared I2C0: touch + keyboard + RTC */
+static i2c_master_bus_handle_t s_i2c = nullptr;   /* shared I2C0: touch + keyboard + codec */
 
 i2c_master_bus_handle_t tdeckI2cBus(void) {
     if (s_i2c) return s_i2c;

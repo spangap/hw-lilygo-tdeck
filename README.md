@@ -4,9 +4,11 @@
 (ESP32-S3FN16R8 — 16 MB flash, 8 MB octal PSRAM; SX1262 LoRa; 2.8" 320×240
 ST7789V LCD; GT911 touch; BlackBerry-style trackball; ESP32-C3 QWERTY keyboard;
 pre-fitted GNSS; microSD). It makes the board usable by an application: it owns
-the power/CS bring-up, the on-device-UI input HAL, the GNSS receiver, the
-optional RTC, the battery monitor, and the mic-codec shim, and it publishes the
-board's pin map and hardware tuning as Kconfig and storage keys.
+the power/CS bring-up, the on-device-UI input HAL, the battery monitor, and the
+mic-codec shim, and it publishes the board's pin map and hardware tuning as
+Kconfig and storage keys. The GNSS receiver itself is the generic
+[gps](../gps) straddle — this board stages it and supplies its
+pins.
 
 It is a **non-buildable** component — it decides nothing about what the device
 *does*. A buildable assembler (`reticulous/reticulous`) adds it and inherits the
@@ -39,7 +41,6 @@ automatically.
 | `tdeckLcdStart` | start | `spangap-lcd` staged | registers the touch/trackball/button input HAL with the LCD component (before `lcdInit`) |
 | `tdeckLcdInit` | init | `spangap-lcd` staged | QWERTY keyboard (needs the LCD task) |
 | `tdeckAudioInit` | init | `spangap/audio` staged | registers the ES7210 mic codec ops |
-| `gpsInit` | init | always | spawns the GNSS task |
 | `tdeckBatteryInit` | init | always | ADC + 1/min battery-voltage timer |
 
 `tdeckStart` **must** precede `spangapInit()`, because the first shared-SPI-bus
@@ -47,14 +48,17 @@ access is the SD-card mount *inside* `spangapInit()` and the SD card is dead
 until the +3.3 V peripheral rail is up and the LCD/LoRa CS lines are parked HIGH.
 That ordering is the reason the board has a `start:` hook at all.
 
-The one thing this board pulls in itself is the on-device LCD UI
-([spangap-lcd](../spangap-lcd)), because the T-Deck physically has a screen
-(`additional_installs:`). Drop it with `--no-lcd` for a headless build — the
-power rail, GNSS, RTC and battery monitor still work; only the input HAL and
-keyboard are compiled out. The display panel, LoRa radio and audio I2S engine
-are owned by other straddles ([spangap-lcd](../spangap-lcd),
-[iface-lora](../iface-lora), [spangap/audio](../audio)); this board only
-supplies their pins (below) and the input/control glue.
+The board pulls in what its hardware warrants (`additional_installs:`): the
+on-device LCD UI ([spangap-lcd](../spangap-lcd)) because it has a screen, the
+audio engine ([spangap/audio](../audio)) because it has a mic and speaker, and
+the GNSS straddle ([gps](../gps)) because the Plus has the
+receiver soldered on. Drop the UI with `--no-lcd` for a headless build — the
+power rail, GNSS and battery monitor still work; only the input HAL and
+keyboard are compiled out. The display panel, LoRa radio, audio I2S engine and
+GNSS task are owned by those straddles ([spangap-lcd](../spangap-lcd),
+[iface-lora](../iface-lora), [spangap/audio](../audio),
+[gps](../gps)); this board only supplies their pins (below) and
+the input/control glue.
 
 ## Board identity (`detect_hw`)
 
@@ -91,7 +95,7 @@ is the only hard power cut.
 
 A single FSPI bus (SPI host 2) is shared by the SD card, the SX1262 LoRa modem
 and the ST7789V display: **SCK 40, MOSI 41, MISO 38**, with a per-device CS.
-A single I2C0 bus (**SDA 18, SCL 8**) carries the keyboard, touch, RTC and audio
+A single I2C0 bus (**SDA 18, SCL 8**) carries the keyboard, touch and audio
 codec.
 
 ### Board-owned pins (in this straddle's `tdeck.h`)
@@ -104,9 +108,7 @@ codec.
 | Trackball U / D / L / R | 3 / 15 / 1 / 2 | four direction lines, active-low pulses |
 | QWERTY keyboard (ESP32-C3) | I2C 0x55, INT 46 | INT dead on stock C3 firmware → polled |
 | GT911 touch | I2C 0x5D *or* 0x14, INT 16 | address latched from INT level at power-on; no RST |
-| PCF8563 RTC | I2C 0x51 | optional — absent on a stock T-Deck |
 | ES7210 mic codec | I2C 0x40 | control only; I2S pins below |
-| GNSS UART | RX 44, TX 43 | UART1, NMEA 8N1; no PPS routed |
 
 ### Bus/peripheral pins this board sets for other straddles (`kconfig:`)
 
@@ -118,6 +120,7 @@ block and consumed by the owning straddle.
 |---|---|
 | **SD card** (spangap-core) | CS 39, SCK 40, MOSI 41, MISO 38, SPI host 2 (SPI mode) |
 | **LoRa SX1262** (iface-lora) | CS 9, DIO1 45, BUSY 13, RST 17; SCK 40 / MOSI 41 / MISO 38; TCXO 1.8 V; DIO2 = RF switch |
+| **GNSS** (gps) | UART1: RX 44 (← GPS TX), TX 43 (→ GPS RX); NMEA 8N1, no PPS routed |
 | **Display ST7789** (spangap-lcd) | CS 12, DC 11, BL 42, no RST (resets with the power rail); 240×320 native, rotated 90°, colour-inverted, 40 MHz PCLK |
 | **Audio out — MAX98357A** (spangap/audio) | I2S1: BCK 7, WS 5, DOUT 6 |
 | **Audio in — ES7210** (spangap/audio) | I2S0: MCLK 48, SCK 47, WS 21, DIN 14; default rate 16 kHz |
@@ -133,11 +136,12 @@ SMA bulkhead. The WiFi/BT antenna is always the module's PCB trace.
 
 ## Storage variables
 
-Settings live under `s.tdeck.*` and `s.gps.*` (writable by the user / browser /
-CLI; the board's **Hardware**, **Display**, **GPS**, **Trackball** and **Centre
-button** sections of the **System** settings page are generated from
-`straddle.yaml`'s `settings:` block). Runtime telemetry is published under bare
-namespaces for anything to observe. All values below are verified against the source.
+Settings live under `s.tdeck.*` (writable by the user / browser / CLI; the
+board's **Hardware**, **Display** and **Trackball** sections of the **System**
+settings page are generated from `straddle.yaml`'s `settings:` block — the
+**GPS** section between them is [gps](../gps)'s own). Runtime
+telemetry is published under bare namespaces for anything to observe. All
+values below are verified against the source.
 
 ### Settings — trackball & pointer (`s.tdeck.*`, live)
 
@@ -161,14 +165,6 @@ the last.
 
 Neither timing is a setting — they are reflexes, not preferences.
 
-### Settings — GNSS (`s.gps.*`)
-
-| Key | Default | Meaning |
-|---|---|---|
-| `s.gps.enable` | `1` | run the receiver; `0` → standby + drop the UART |
-| `s.gps.interval` | `5` | fix cadence: `0` = continuous (1 Hz), `1`–`10` = PSM cyclic-tracking period (s, u-blox only) |
-| `s.gps.ignore_clock` | `0` | `1` = never set the system clock from GPS |
-
 ### Runtime / telemetry (published)
 
 | Key | Meaning |
@@ -177,26 +173,11 @@ Neither timing is a setting — they are reflexes, not preferences.
 | `battery.millivolt` | true VBAT in mV (pin reading × 2, EMA-smoothed) |
 | `battery.percent` | 0–100 via the measured discharge curve |
 | `tdeck.touch` | GT911 probe result string (`GT911 @ 0x5D` / `not found`) |
-| `tdeck.multi_touch` | runtime *input* flag (no `s.`): a consumer (e.g. maps) sets it to enable multi-point touch; not persisted |
-| `gps.model` | inferred receiver, or `detecting…` / `not detected` |
-| `gps.baud` | locked baud (`0` when not running) |
-| `gps.state` | `off` / `detecting` / `not detected` / `standby` / `power-cycle to wake` / `acquiring` / `fix` |
-| `gps.fix` | `none` / `2D` / `3D` |
-| `gps.quality` | GGA fix-quality indicator |
-| `gps.lat` `gps.lon` | decimal degrees (6 dp); **last-known**, not cleared on fix loss |
-| `gps.alt` `gps.geoid` | metres (1 dp) — MSL altitude, geoid separation |
-| `gps.speed` `gps.course` | km/h, degrees (1 dp) |
-| `gps.sats_used` `gps.sats_view` | satellites in solution / summed in-view |
-| `gps.hdop` `gps.vdop` `gps.pdop` | dilution of precision (2 dp) |
-| `gps.snr` | best C/N0 this epoch (dBHz) |
-| `gps.utc` | `YYYY-MM-DD HH:MM:SS`, UTC |
-| `gps.fix_age` | seconds since the last positioned fix; `-1` = never this session |
+| `lcd.multi_touch` | runtime *input* flag (no `s.`, owned by spangap-lcd): a consumer (e.g. maps) sets it to enable multi-point touch; not persisted |
 
-The GNSS task also interacts with the platform's clock namespace (owned by
-[spangap-core](../spangap-core)/its clock layer): it writes `sys.time.valid`
-when it disciplines the clock and asserts `sys.time.ext` to claim clock
-authority (NTP parks while it is set). The centre-button / inactivity standby
-path drives the ephemeral `sys.standby` key, which the input HAL subscribes to.
+The GNSS keys (`s.gps.*`, `gps.*`) are [gps](../gps)'s — see its
+README. The centre-button / inactivity standby path drives the ephemeral
+`sys.standby` key, which the input HAL subscribes to.
 
 ### Surfaced but owned elsewhere
 
@@ -205,24 +186,17 @@ The board adds `s.lcd.backlight` and `s.lcd.inactivity_timeout` (owned by
 this block only surfaces them. Runtime LoRa parameters live at `s.lora.*`
 ([iface-lora](../iface-lora)).
 
-## CLI
-
-Run any of these on the live device through `spangap cli "<command>"`.
-
-```
-gps              GNSS status — state, model, baud, interval, position, fix, sats, DOP, UTC
-gps on | off     set s.gps.enable
-```
-
 ## Dependencies
 
 - [spangap-core](../spangap-core) — base runtime (storage, log, CLI, fs, ITS).
 - [spangap-lcd](../spangap-lcd) — pulled in by default (the board has a screen);
   drop with `--no-lcd`. Supplies the LCD shell/`LcdApp` model; this board only
   wires the touch/trackball/button/keyboard hardware into it.
+- [gps](../gps) — pulled in by default (the Plus has the
+  receiver); this board only supplies the `CONFIG_GPS_*` pins.
 - `esp_lcd_touch_gt911` — GT911 driver for the touch input HAL.
 
 ## Read next
 
-- [INTERNALS.md](INTERNALS.md) — bring-up ordering, the GNSS/RTC/battery/audio/
-  LCD-input internals, the threading model, and the board pitfalls.
+- [INTERNALS.md](INTERNALS.md) — bring-up ordering, the battery/audio/LCD-input
+  internals, the threading model, and the board pitfalls.

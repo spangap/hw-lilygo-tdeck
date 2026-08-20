@@ -4,7 +4,7 @@
  * What this module provides:
  *   - Compile-time hardware constants for the board's bespoke peripherals: the
  *     peripheral power rail, GT911 touch, optical trackball, centre/Home button,
- *     QWERTY keyboard, and GNSS. Consumed by tdeck.cpp and gps.cpp.
+ *     and QWERTY keyboard. Consumed by tdeck.cpp.
  *   - The board bring-up API (`tdeckStart` / `tdeckInit`). tdeck.cpp owns
  *     and starts everything board-specific: the peripheral power rail, the
  *     shared-SPI CS park, and — when the lcd component is built — the input HAL
@@ -14,9 +14,11 @@
  * The display itself (SPI bus, ST7789 controller, backlight, orientation) is not
  * wired here: it is owned by the lcd component and configured through
  * CONFIG_LCD_* in sdkconfig.defaults. The LoRa radio pins likewise come from
- * iface-lora's CONFIG_LORA*. So this header carries only the board's own
- * input / GNSS pins. Runtime LoRa parameters (freq, BW, SF, ...) live in storage
- * at s.lora.* (see lora.cpp). Full reference: docs/tdeck.md.
+ * iface-lora's CONFIG_LORA*, and the GNSS receiver's from gps's
+ * CONFIG_GPS_* — all supplied by straddle.yaml's kconfig: block. So this header
+ * carries only the board's own input pins. Runtime LoRa parameters (freq, BW,
+ * SF, ...) live in storage at s.lora.* (see lora.cpp). Full reference:
+ * docs/tdeck.md.
  */
 #pragma once
 
@@ -76,16 +78,6 @@
 #define BOARD_KB_ADDR           0x55
 #define BOARD_KB_INT_PIN        46
 
-/* GNSS receiver — pre-soldered on the Plus, hard-wired to the Grove header.
- * NMEA over UART 8N1. The chip is production-batch dependent: Quectel L76K
- * (default 9600) or u-blox MIA-M10Q (default 38400) — no host-visible id, so
- * gps.cpp autobauds and infers the model from the baud (docs/tdeck.md §1.3).
- * Powered off the shared BOARD_POWER_EN_PIN rail (no independent GPS enable);
- * PPS is not routed on the Plus. Host RX <- GPS TX = 44; host TX -> GPS RX = 43. */
-#define BOARD_GPS_UART_NUM      1
-#define BOARD_GPS_RX_PIN        44
-#define BOARD_GPS_TX_PIN        43
-
 /**
  * Board bring-up. tdeckStart() is the always-on hardware bring-up: it drives the
  * peripheral power rail HIGH and parks the shared-SPI CS lines (the first
@@ -119,9 +111,9 @@ public:
 /**
  * Shared I2C0 master bus (SDA=BOARD_TOUCH_I2C_SDA, SCL=BOARD_TOUCH_I2C_SCL).
  * Created lazily on first call; the first caller wins and all later callers get
- * the same handle. Home to the GT911 touch (0x5D) and QWERTY keyboard (0x55)
- * when the lcd component is built, and the PCF8563 RTC (0x51) regardless — so
- * this accessor is always compiled, not gated on CONFIG_SPANGAP_LCD. Returns
- * nullptr if the bus could not be created. Thread-safe at the IDF driver layer.
+ * the same handle. Home to the GT911 touch (0x5D) and QWERTY keyboard (0x55) —
+ * conditional/spangap-lcd/ — and the ES7210 codec (0x40) — conditional/audio/.
+ * Returns nullptr if the bus could not be created. Thread-safe at the IDF
+ * driver layer.
  */
 i2c_master_bus_handle_t tdeckI2cBus(void);

@@ -85,11 +85,10 @@ static void tdeckTouchInit(void) {
     if (!i2c) return;
 
     /* Multi-touch is opt-in and ephemeral: a consumer (e.g. the maps app) sets
-     * the runtime flag `tdeck.multi_touch` (no `s.` — not persisted, not a
-     * setting) while it wants gestures. Watch it and flip the generic lcd
-     * multipoint read mode. The GT911 is a 5-point controller. Runs on the lcd
-     * task (board HAL init), same as the trackball subs above. */
-    NOW_AND_ON_CHANGE("tdeck.multi_touch", { lcdTouchSetMultipoint(atoi(val) != 0); });
+     * the runtime flag `lcd.multi_touch` while it wants gestures, and the lcd
+     * component's own subscription flips the multipoint read mode
+     * (lcd_touch.cpp) — nothing to watch here. The GT911 is a 5-point
+     * controller. */
 
     esp_lcd_touch_config_t tcfg = {};
     /* Leave esp_lcd_touch at IDENTITY (native coords) and let the lcd component

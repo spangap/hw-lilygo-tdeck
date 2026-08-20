@@ -1,14 +1,14 @@
 # hw-lilygo-tdeck board HAL — an ordinary spangap component (no longer a buildable).
 #
 # Compiles the LilyGo T-Deck Plus board code: power/CS/reset + the display/
-# touch/trackball/button input HAL + QWERTY keyboard (tdeck.cpp), the GNSS
-# receiver (gps.cpp) and the RTC (rtc.cpp). The on-device-UI input HAL lives in
+# touch/trackball/button input HAL + QWERTY keyboard (tdeck.cpp). The GNSS
+# receiver is the generic spangap/gps straddle (this board only stages
+# it and supplies its CONFIG_GPS_* pins). The on-device-UI input HAL lives in
 # conditional/spangap-lcd/ and is compiled ONLY when spangap-lcd is staged.
 #
 # app_main is NOT here — it's generated into the reticulous/reticulous buildable
-# that adds this board with `--with`. This component just exports the board
-# start:/init: hook symbols (tdeckStart / tdeckLcdStart / tdeckLcdInit / gpsInit)
-# that the generated dispatcher calls.
+# that adds this board with `--with`. This component just exports the board's
+# Service classes that the generated dispatcher constructs and walks.
 include(${CMAKE_CURRENT_LIST_DIR}/spangap_requires.cmake)
 idf_component_register(
     SRCS
@@ -16,8 +16,6 @@ idf_component_register(
         # This board's one self-assertion (detect_hw), called by
         # spangapInit() before any bus is claimed.
         "src/detect.cpp"
-        "src/gps.cpp"
-        "src/rtc.cpp"
         # conditional/<name>/ board code, compiled only when <name> is staged
         # (conditional/spangap-lcd/src/tdeck_lcd.cpp).
         ${SPANGAP_CONDITIONAL_SRCS}
