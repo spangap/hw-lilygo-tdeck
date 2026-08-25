@@ -79,13 +79,13 @@ settings:
     rows:
       - section: "Display"
       - slider: { label: "Backlight",       key: "s.lcd.backlight",          min: 0, max: 255 }
-      - slider: { label: "Dim after (s)",  key: "s.lcd.inactivity_timeout", min: 0, max: 120 }
+      - integer: { label: "Dim after", unit: "s",  key: "s.lcd.inactivity_timeout", min: 0, max: 120 }
   - at: [ { id: system } ]
     order: 40
     rows:
       - section: "Trackball"
       - slider: { label: "Pointer speed",    key: "s.tdeck.trackball_speed",      min: 4, max: 40, default: 16 }
-      - slider: { label: "Cursor dwell (s)", key: "s.tdeck.pointer_visible_time", min: 1, max: 30, default: 2 }
+      - integer: { label: "Cursor dwell", unit: "s", key: "s.tdeck.pointer_visible_time", min: 1, max: 30, default: 2 }
 
 # Board VALUES, fed to the symbols other straddles / IDF DEFINE through the
 # collected staging/sdkconfig.spangap-fragments. A board straddle is non-
