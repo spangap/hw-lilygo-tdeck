@@ -181,9 +181,15 @@ README. The centre-button / inactivity standby path drives the ephemeral
 
 ### Surfaced but owned elsewhere
 
-The board adds `s.lcd.backlight` and `s.lcd.inactivity_timeout` (owned by
-[spangap-lcd](../spangap-lcd)) to the **Display** section that straddle opens —
-this block only surfaces them. Runtime LoRa parameters live at `s.lora.*`
+The board adds `s.lcd.backlight`, `s.lcd.inactivity_timeout` and
+`s.lcd.wake_on_touch` (owned by [spangap-lcd](../spangap-lcd)) to the
+**Display** section that straddle opens — this block only surfaces them. The
+last of those ships **off** here (`CONFIG_LCD_WAKE_ON_TOUCH_DEFAULT` is not
+set): this deck travels in a pocket, where a bag full of touches lighting the
+screen costs more than the convenience is worth, so the centre button is the
+way back. Switched on, standby leaves the GT911's INT armed as a light-sleep
+wake source and the poll task — otherwise parked — samples it on that wake and
+clears `sys.standby` if a finger is really there. Runtime LoRa parameters live at `s.lora.*`
 ([iface-lora](../iface-lora)).
 
 ## Dependencies

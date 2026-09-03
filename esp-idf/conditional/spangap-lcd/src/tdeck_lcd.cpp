@@ -48,6 +48,8 @@ static bool tdeckPointerRead(int* x, int* y);
 static void tdeckStandby(bool on);
 static bool tdeckTouchSample(void);            /* poll task: read GT911 → latch */
 static void tdeckTouchIsr(void*);              /* GT911 INT → wake the poll task (IRAM, see defn) */
+static void tdeckTouchWakeArm(bool on);        /* standby: glass as a wake source */
+static void tdeckTouchWakeCheck(void);         /* poll task: a touch woke us — really? */
 
 /* GT911 handle, created in tdeckInputInit(); null if the controller didn't
  * answer (then tdeckTouchRead reports no touches and the indev never fires). */
@@ -55,6 +57,28 @@ static esp_lcd_touch_handle_t s_touch = nullptr;
 /* True while in standby: the GT911 reads are gated off (only the centre button is
  * left live to wake the device). Set by tdeckStandby on the lcd task. */
 static bool                   s_touchAsleep = false;
+
+/* ---- wake on touch (s.lcd.wake_on_touch, off by default on this board) ----
+ * A deck that rides in a pocket wants its centre button to be the only way
+ * back — a bag full of touches would keep lighting the screen — so the key
+ * ships off here and on a handheld ships on (the lcd component seeds it from
+ * CONFIG_LCD_WAKE_ON_TOUCH_DEFAULT, and both boards carry the Display row).
+ * When it IS on, standby leaves the GT911's INT armed as a light-sleep wake
+ * source and the poll task, otherwise parked, samples the controller on that
+ * wake and clears sys.standby if a finger is really there.
+ *
+ * The two traps the centre button's wake carries apply here identically: the
+ * level, not an edge, because edges are invisible while the GPIO clock is
+ * gated — and a level ISR that re-fires for the whole touch, so the ISR
+ * silences the pin and the check below re-enables it. The armed level is
+ * whatever the line is NOT resting at: GT911 INT polarity varies by
+ * sub-revision (the awake wiring is ANYEDGE for the same reason), and arming
+ * the resting level would wake the deck for ever. */
+static bool                   s_touchWakeArmed = false;
+static int                    s_touchWakeLevel = 0;
+/* The finger that woke the deck is swallowed until it lifts: waking is all it
+ * does, exactly as the wake press is absorbed rather than clicking. */
+static bool                   s_touchWakeAbsorb = false;
 
 /* ---- touch latch: sampled on the poll task, read on the lcd task -------------
  * The GT911 read moved off the lcd task onto the keyboard poll task, so a touch
@@ -196,6 +220,14 @@ static bool tdeckTouchRead(lcd_raw_pt_t* pts, int max, int* count) {
  * — esp_lcd_touch blocks on the bus and must not run under the spinlock. */
 static bool tdeckTouchSample(void) {
     if (!s_touch || s_touchAsleep) return false;
+    if (s_touchWakeAbsorb) {                 /* the waking finger: nothing until it lifts */
+        esp_lcd_touch_point_data_t wpt[5] = {};
+        uint8_t wcnt = 0;
+        if (esp_lcd_touch_read_data(s_touch) == ESP_OK)
+            esp_lcd_touch_get_data(s_touch, wpt, &wcnt, 5);
+        if (wcnt == 0) s_touchWakeAbsorb = false;
+        return false;
+    }
     esp_lcd_touch_point_data_t pt[5] = {};
     uint8_t cnt = 0;
     /* A bus glitch loses one sample and the next poll picks the finger back up,
@@ -851,7 +883,14 @@ void pollTask(void*) {
          * button is the only thing left to wake the device). tdeckStandby unparks
          * us with a notify. Park on a clean self-check, not a suspend, so we never
          * stop mid-I2C-transaction holding the shared bus. */
-        if (s_standby) { ulTaskNotifyTake(pdTRUE, portMAX_DELAY); continue; }
+        if (s_standby) {
+            ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+            /* Woken while parked: with the glass armed as a wake source that
+             * notify is a touch (the centre button goes to the lcd task), so
+             * ask the controller whether a finger is really there. */
+            if (s_standby && s_touchWakeArmed) tdeckTouchWakeCheck();
+            continue;
+        }
         /* Woken by a touch/keyboard INT, or times out to poll. Faster cadence
          * while a finger is down so touch tracking stays smooth. */
         ulTaskNotifyTake(pdTRUE, s_touchDown ? TOUCH_PERIOD : POLL_PERIOD);
@@ -888,6 +927,49 @@ static void IRAM_ATTR tdeckTouchIsr(void*) {
     portYIELD_FROM_ISR(hp);
 }
 
+/* The standby wake variant: silence the pin on first fire (a level ISR re-fires
+ * for as long as the finger holds INT at the armed level; tdeckTouchWakeCheck
+ * re-enables it), then the same notify. LL register write, not
+ * gpio_intr_disable() — the driver call takes a non-ISR spinlock. */
+static void IRAM_ATTR tdeckTouchWakeIsr(void* arg) {
+    gpio_ll_intr_disable(&GPIO, (gpio_num_t)BOARD_TOUCH_INT_PIN);
+    tdeckTouchIsr(arg);
+}
+
+/* Swap the GT911 INT between its awake wiring (ANYEDGE → the poll task) and the
+ * standby wake source. Lcd task, from tdeckStandby. */
+static void tdeckTouchWakeArm(bool on) {
+    if (on == s_touchWakeArmed || !s_touch) return;
+    gpio_isr_handler_remove((gpio_num_t)BOARD_TOUCH_INT_PIN);
+    gpio_isr_handler_add((gpio_num_t)BOARD_TOUCH_INT_PIN,
+                         on ? tdeckTouchWakeIsr : tdeckTouchIsr, nullptr);
+    if (on) {
+        s_touchWakeLevel = gpio_get_level((gpio_num_t)BOARD_TOUCH_INT_PIN) ? 0 : 1;
+        pmGpioWakeEnable(BOARD_TOUCH_INT_PIN,
+                         s_touchWakeLevel ? GPIO_INTR_HIGH_LEVEL : GPIO_INTR_LOW_LEVEL);
+    } else {
+        pmGpioWakeDisable(BOARD_TOUCH_INT_PIN);
+        gpio_set_intr_type((gpio_num_t)BOARD_TOUCH_INT_PIN, GPIO_INTR_ANYEDGE);
+    }
+    gpio_intr_enable((gpio_num_t)BOARD_TOUCH_INT_PIN);
+    s_touchWakeArmed = on;
+}
+
+/* Poll task, woken while parked in standby: is there really a finger on the
+ * glass? Only that clears the key — the INT can fire for a glitch, and the
+ * sample itself is never reported (the touch that wakes must not also click
+ * whatever the dark screen was showing). */
+static void tdeckTouchWakeCheck(void) {
+    gpio_intr_enable((gpio_num_t)BOARD_TOUCH_INT_PIN);   /* the wake ISR silenced it */
+    if (!s_touch || esp_lcd_touch_read_data(s_touch) != ESP_OK) return;
+    esp_lcd_touch_point_data_t pt[5] = {};
+    uint8_t cnt = 0;
+    esp_lcd_touch_get_data(s_touch, pt, &cnt, 5);
+    if (cnt == 0) return;
+    s_touchWakeAbsorb = true;
+    storageSet("sys.standby", 0);   /* tdeckStandby(false) does the rest */
+}
+
 /* sys.standby subscription target (lcd task). The lcd component only flips the
  * key — on the inactivity timeout or our centre button; we decide what the device
  * actually does: display off, GT911 reads gated, keyboard scan parked. Only the
@@ -910,6 +992,9 @@ static void tdeckStandby(bool on) {
         if (!s_standbyLock) pmLockCreate(PM_NO_LIGHT_SLEEP, "standby", &s_standbyLock);
         pmLockAcquire(s_standbyLock);
         if (gpio_get_level((gpio_num_t)BOARD_HOME_BTN_PIN) != 0) tdeckWakeArm();
+        /* Read fresh at every standby, so a change made while the screen was on
+         * is in force the moment it goes off. */
+        if (storageGetInt("s.lcd.wake_on_touch", 0)) tdeckTouchWakeArm(true);
         info("standby\n");
     } else {
         if (s_wakeArmed) {
@@ -923,6 +1008,7 @@ static void tdeckStandby(bool on) {
         } else {
             pmLockRelease(s_standbyLock);              /* never armed — still held */
         }
+        tdeckTouchWakeArm(false);                      /* back to the awake INT wiring */
         s_touchAsleep = false;
         if (s_pollTask) xTaskNotifyGive(s_pollTask);   /* unpark the keyboard scan */
         lcdScreenWake();                               /* display on, backlight fade-in */

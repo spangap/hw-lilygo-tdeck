@@ -80,6 +80,8 @@ settings:
       - section: "Display"
       - slider: { label: "Backlight",       key: "s.lcd.backlight",          min: 0, max: 255 }
       - integer: { label: "Dim after", unit: "s",  key: "s.lcd.inactivity_timeout", min: 0, max: 120 }
+      - switch: { label: "Wake on touch",   key: "s.lcd.wake_on_touch" }
+      - caption: "Off by default: this deck travels in a pocket, where the centre button is the way back."
   - at: [ { id: system } ]
     order: 40
     rows:
