@@ -12,7 +12,7 @@
  * esp-idf/conditional/audio/), and called from the `when: spangap/audio` init
  * hook tdeckAudioInit, which just stows the ops pointer with the engine.
  *
- * BENCH-VERIFY (audio plan open item #2): the register table below configures
+ * BENCH-VERIFY: the register table below configures
  * the ES7210 for 16-bit I2S-slave operation with all four mics enabled at a
  * fixed gain. Slave mode needs no sample-rate coefficient table (the chip
  * derives its serial clocks from the externally supplied BCLK/WS), so the
