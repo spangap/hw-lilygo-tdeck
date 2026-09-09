@@ -17,7 +17,7 @@ esp-idf/
 ├── idf_component.yml         deps: idf >=5.5, esp_lcd_touch_gt911
 ├── include/tdeck.h           public board API + BOARD_* pin macros
 ├── src/
-│   ├── tdeck.cpp             power rail + CS park, shared I2C0, battery monitor
+│   ├── tdeck.cpp             power rail + chip-select park, shared I2C0, battery monitor
 │   └── detect.cpp            board self-assertion (detect_hw)
 └── conditional/
     ├── spangap-lcd/src/tdeck_lcd.cpp   input HAL: touch, trackball, button, keyboard
@@ -35,7 +35,7 @@ only on an LCD build, `tdeck_audio.cpp` only on an audio build.
 
 Everything here is new (a board contributes hardware, not protocol). The subsystems:
 
-- **Peripheral power rail + shared-SPI CS park** (`tdeckStart`/`tdeckPowerInit`).
+- **Peripheral power rail + shared-SPI chip-select park** (`tdeckStart`/`tdeckPowerInit`).
 - **Shared I2C0 master bus** (`tdeckI2cBus`) — keyboard, touch, audio codec.
 - **Battery monitor** (`tdeckBatteryInit`) — ADC + curve + 1/min timer.
 - **On-device input HAL** (`tdeckLcdStart`/`tdeckLcdInit`) — touch, trackball
@@ -282,7 +282,7 @@ four hardware mics only one is populated on the board (the rest are unconnected)
 
 ## 6. Pitfalls
 
-- **`tdeckStart` before `spangapInit()`.** Power rail + CS park must precede the
+- **`tdeckStart` before `spangapInit()`.** Power rail + chip-select park must precede the
   SD mount; this is the whole reason for the `start:` band. Don't reorder it into
   `init:`.
 - **Keep FreeRTOS sync objects out of PSRAM.** Internal DRAM/DMA is scarce on the
