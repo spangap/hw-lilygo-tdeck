@@ -1,12 +1,12 @@
 /**
  * tdeck_lcd.cpp — T-Deck Plus on-device-UI input HAL: GT911 touch, trackball
- * pointer, centre/Home button, and the QWERTY keyboard. Lives under
- * esp-idf/main/conditional/spangap-lcd/, so it is compiled ONLY when spangap-lcd
- * is staged — no #if needed. Registered via two when: spangap/spangap-lcd hooks:
- *   tdeckLcdStart()  start: band — input HAL register (was tdeckInputRegister).
- *   tdeckLcdInit()   init:  band — keyboard bring-up    (was tdeckKeyboardInit).
- * Extracted verbatim from tdeck.cpp. tdeckI2cBus() and the BOARD_* pin macros
- * come from tdeck.h.
+ * pointer, centre/Home button, the QWERTY keyboard and the lamp under its keys.
+ * Lives under esp-idf/conditional/spangap-lcd/, so it is compiled ONLY when
+ * spangap-lcd is staged — no #if needed. Reaches the boot through the
+ * TdeckLcdInput service (tdeck_lcd.h):
+ *   onStart()  start: band — input HAL register, before lcdInit().
+ *   onInit()   init:  band — keyboard bring-up, once the lcd task exists.
+ * tdeckI2cBus() and the BOARD_* pin macros come from tdeck.h.
  */
 #include "tdeck.h"
 #include "tdeck_lcd.h"
@@ -50,6 +50,8 @@ static bool tdeckTouchSample(void);            /* poll task: read GT911 → latc
 static void tdeckTouchIsr(void*);              /* GT911 INT → wake the poll task (IRAM, see defn) */
 static void tdeckTouchWakeArm(bool on);        /* standby: glass as a wake source */
 static void tdeckTouchWakeCheck(void);         /* poll task: a touch woke us — really? */
+static void kbBacklightInit(void);             /* keyboard lamp: follow the screen (lcd task) */
+static void kbBacklightSetLit(bool on);        /* keyboard lamp: the on/off latch (lcd task) */
 
 /* GT911 handle, created in tdeckInputInit(); null if the controller didn't
  * answer (then tdeckTouchRead reports no touches and the indev never fires). */
@@ -76,16 +78,21 @@ static bool                   s_touchAsleep = false;
  * the resting level would wake the deck for ever. */
 static bool                   s_touchWakeArmed = false;
 static int                    s_touchWakeLevel = 0;
+/* Set by the wake ISR, cleared by the check it asks for. The poll task is woken
+ * while parked by anything that notifies it — a keyboard-lamp push during the
+ * fade to dark as much as a finger — and only the glass's own edge is grounds
+ * for waking the GT911 up to ask it about a finger. */
+static volatile bool          s_touchWakeFired = false;
 /* The finger that woke the deck is swallowed until it lifts: waking is all it
  * does, exactly as the wake press is absorbed rather than clicking. */
 static bool                   s_touchWakeAbsorb = false;
 
 /* ---- touch latch: sampled on the poll task, read on the lcd task -------------
- * The GT911 read moved off the lcd task onto the keyboard poll task, so a touch
+ * The GT911 read lives on the keyboard poll task, not the lcd task, so a touch
  * read never waits behind a render and never fights the render for the shared
- * I2C0 bus (the two used to contend). tdeckTouchSample() (poll task) does the
- * I2C read and stores the sample here; tdeckTouchRead() (lcd task, the
- * lcd_input.h touch_read) just returns it — no hardware access.
+ * I2C0 bus. tdeckTouchSample() (poll task) does the I2C read and stores the
+ * sample here; tdeckTouchRead() (lcd task, the lcd_input.h touch_read) just
+ * returns it — no hardware access.
  *
  * Missed-tap replay: if a whole tap completes (finger down then up, no real
  * movement) while the lcd task was too busy to read even one pressed sample, the
@@ -307,6 +314,7 @@ static constexpr uint32_t kMulticlickMs  = 250;   /* a further click has to land
 
 static lv_timer_t*    s_standbyTimer = nullptr;   /* fires at kStandbyHoldMs -> standby */
 static lv_timer_t*    s_clickTimer   = nullptr;   /* fires at kMulticlickMs -> dispatch the burst */
+static lv_timer_t*    s_kbHoldTimer  = nullptr;   /* wake press still held at kStandbyHoldMs -> lamp */
 static int            s_clicks       = 0;         /* releases counted in the current burst */
 static bool           s_clickAssert  = false;     /* one-shot: the next click_read() is a click */
 static bool           s_btnHeld      = false;     /* a press is in progress */
@@ -404,6 +412,27 @@ static void cancelClickBurst(void) {
     s_wokeBurst = false;
 }
 
+/* The waking press, still held: light the keys. The same hold that puts the deck
+ * to sleep brings the keyboard up on the way back, which leaves a plain tap
+ * meaning what it has always meant — wake the screen, nothing else — so a deck
+ * picked up for a glance costs no lamp and a deck picked up to type on asks for
+ * one in the gesture that wakes it. The screen is never made to wait for this:
+ * it comes up the instant the press lands, and only the keys watch the clock. */
+static void btnKbLightCb(lv_timer_t*) {
+    s_kbHoldTimer = nullptr;   /* the one-shot self-deleted after this fire */
+    kbBacklightSetLit(true);
+}
+
+static void cancelKbHoldTimer(void) {
+    if (s_kbHoldTimer) { lv_timer_delete(s_kbHoldTimer); s_kbHoldTimer = nullptr; }
+}
+
+static void armKbHoldTimer(void) {
+    cancelKbHoldTimer();
+    s_kbHoldTimer = lv_timer_create(btnKbLightCb, kStandbyHoldMs, nullptr);
+    lv_timer_set_repeat_count(s_kbHoldTimer, 1);
+}
+
 static void armClickWindow(void) {
     if (s_clickTimer) lv_timer_delete(s_clickTimer);
     s_clickTimer = lv_timer_create(btnClickCb, kMulticlickMs, nullptr);
@@ -463,6 +492,7 @@ static bool tdeckClickRead(void) {
     if (s_wakeAbsorb) {
         if (!down) {
             s_wakeAbsorb = false;
+            cancelKbHoldTimer();   /* lifted before the hold landed: no lamp */
             if (s_standby && !s_wakeArmed) tdeckWakeArm();
             /* Only a press that WOKE us opens a burst — the one that put the
              * device to sleep is absorbed and counts as nothing. */
@@ -490,8 +520,8 @@ static bool tdeckClickRead(void) {
             /* Still down: swallow until it lifts, and let that release open the
              * burst. Already lifted (the ISR latched a press we only see now):
              * there is no release left to wait for, so open it here. */
-            if (down) { s_wakeAbsorb = true; s_wakeClick = true; }
-            else      beginWakeBurst();
+            if (down) { s_wakeAbsorb = true; s_wakeClick = true; armKbHoldTimer(); }
+            else      beginWakeBurst();   /* already lifted: a tap, so no lamp */
         }
         /* Woken with nothing to act on (an already-consumed blip, or a non-button
          * wake): the ISR silenced the pin, so re-arm it or the button goes deaf. */
@@ -727,6 +757,9 @@ static void tdeckInputInit(void) {
      * plus our own input (touch + keyboard scan) off. This init runs on the lcd
      * task, so the subscription dispatches there and lcdScreenSleep/Wake are safe. */
     storageSubscribeChanges("sys.standby", ON_CHANGE { tdeckStandby(atoi(val) != 0); });
+
+    /* The keyboard's own lamp rides on the screen's backlight from here. */
+    kbBacklightInit();
 }
 
 /* onStart — register this board's input HAL with the lcd component, before
@@ -753,16 +786,16 @@ void TdeckLcdInput::onStart() {
  *   - The 1-byte read is destructive (pops the key) with no peek and returns 0
  *     when empty, so we can't tell a key is pending without consuming it.
  *
- * So a dedicated low-prio task polls the I2C off the lcd task, buffers keys into
- * a queue, and bumps the lcd task (lcdRun) to drain them through our LVGL keypad
- * indev. We keep GPIO46 wired anyway: an edge wakes the poll early and is
- * reported by the kbint diagnostic (useful if a future firmware drives it).
+ * So a dedicated task polls the I2C off the lcd task, buffers keys into a queue,
+ * and bumps the lcd task (lcdRun) to drain them through our LVGL keypad indev.
+ * We keep GPIO46 wired anyway: an edge wakes the poll early and is reported by
+ * the kbint diagnostic (useful if a future firmware drives it).
  *
- * This same task also samples the GT911 touch (tdeckTouchSample): touch and the
- * keyboard are the only two peripherals on I2C0, so scanning both from one task
- * off the lcd task removes the read from the render path and removes the bus
- * contention the two tasks used to have. The touch INT (tdeckTouchIsr) and a
- * finger-down both shorten the scan cadence for smooth tracking; see below.
+ * This same task also samples the GT911 touch (tdeckTouchSample) and writes the
+ * keyboard's own lamp: they are the only peripherals on I2C0, so one task off
+ * the lcd task keeps the reads out of the render path and leaves the bus with a
+ * single owner. The touch INT (tdeckTouchIsr) and a finger-down both shorten the
+ * scan cadence for smooth tracking; see below.
  *
  * Dependency is one-way: we call into lcd (lcdRun / lcdTouchPoll / lcdInputGroup /
  * lcdSetHasKeyboard); the lcd component has no knowledge of the keyboard. */
@@ -773,6 +806,8 @@ QueueHandle_t           s_queue      = nullptr;   /* bytes: poll task -> lcd tas
 TaskHandle_t            s_pollTask   = nullptr;
 lv_indev_t*             s_indev      = nullptr;    /* our keypad indev (lcd task) */
 bool                    s_again      = false;      /* lcd task: more to drain this cycle */
+bool                    s_drainOwed  = false;      /* poll task: queued bytes the lcd task
+                                                      has not been bumped for yet */
 volatile uint32_t       s_intCount   = 0;          /* for the kbint diagnostic */
 
 /* Poll periods. The C3 holds only the last unread key (no buffer), so any lazy
@@ -782,6 +817,111 @@ volatile uint32_t       s_intCount   = 0;          /* for the kbint diagnostic *
  * component re-reads the latch every 10 ms, so refresh it at a matching rate. */
 constexpr TickType_t POLL_PERIOD  = pdMS_TO_TICKS(30);
 constexpr TickType_t TOUCH_PERIOD = pdMS_TO_TICKS(10);
+
+/* ---- keyboard lamp ----------------------------------------------------------
+ *
+ * The lamps under the keys are the C3's, not ours: it owns the GPIO and the PWM,
+ * and all we have is a two-byte write. So the lamp is driven by intent rather
+ * than held at a level — we say what it should be at each moment the screen
+ * changes, and say nothing in between.
+ *
+ * Whether it is wanted at all is a latch (s_kbLit), and only a HELD wake press
+ * sets it: waking the deck for a glance should not light a keyboard nobody is
+ * about to type on. Once lit it follows the screen's own duty, scaled to the
+ * configured level — the same proportional cut at the dim step, dark by the time
+ * the panel powers off, which also clears the latch. So each trip out of standby
+ * asks for the lamp again. lcdBacklightOnChange feeds us every step of that on
+ * the lcd task; we hand the wanted duty to the poll task, which owns I2C0 and
+ * does the write on its next pass.
+ *
+ * A duty already written is never rewritten, and that is deliberate: the
+ * keyboard's own Alt+B toggles the lamp behind our back — the C3 handles the
+ * combo itself and sends no byte — so an Alt+B stands until the screen next
+ * changes state, instead of being stamped back out within 30 ms. Alt+B lights to
+ * the same configured level, which is what ALT_B_LEVEL keeps in sync. The one
+ * write never skipped as a repeat is the one that takes the lamp out with the
+ * screen: a deck must not sleep with lit keys, and an unseen Alt+B is exactly the
+ * way it otherwise could. Reading the lamp back is not possible at all in key
+ * mode; raw-matrix mode would make the combo visible (docs/tdeck.md). */
+constexpr uint32_t KB_BL_PREVIEW_MS = 3000;   /* slider moved: hold it lit this long */
+
+int            s_kbBlLevel   = 0;        /* s.tdeck.kb_backlight: duty when fully lit */
+bool           s_kbLit       = false;    /* the lamp is wanted: set by a held wake press */
+uint8_t        s_panelDuty   = 0;        /* live screen backlight, from the follow hook */
+volatile int   s_kbBlWant    = -1;       /* duty the lcd task wants (-1 = nothing yet) */
+int            s_kbBlSent    = -1;       /* duty the poll task last wrote */
+volatile bool  s_kbBlForce   = false;    /* write it even if it repeats what we last sent */
+volatile int   s_kbAltWant   = -1;       /* level Alt+B should light to */
+int            s_kbAltSent   = -1;       /* level last written as that */
+lv_timer_t*    s_kbBlPreview = nullptr;  /* live while the slider preview holds it lit */
+bool           s_kbBlSeeded  = false;    /* the first apply is boot, not a slider move */
+
+/* Poll task: push whatever the lcd task last asked for. Two independent writes,
+ * each skipped when it would say what the C3 already knows. */
+void kbBacklightPush() {
+    if (!s_kbd) return;
+    int alt = s_kbAltWant;
+    if (alt > 30 && alt != s_kbAltSent) {    /* the C3 ignores 30 and below */
+        uint8_t cmd[2] = { BOARD_KB_CMD_ALT_B_LEVEL, (uint8_t)alt };
+        if (i2c_master_transmit(s_kbd, cmd, sizeof(cmd), 20) == ESP_OK) s_kbAltSent = alt;
+    }
+    int  want  = s_kbBlWant;
+    bool force = s_kbBlForce;
+    if (want < 0 || (want == s_kbBlSent && !force)) return;
+    uint8_t cmd[2] = { BOARD_KB_CMD_BRIGHTNESS, (uint8_t)want };
+    if (i2c_master_transmit(s_kbd, cmd, sizeof(cmd), 20) == ESP_OK) {
+        s_kbBlSent  = want;
+        s_kbBlForce = false;
+    }
+}
+
+/* Lcd task: work out the duty the lamp should be at and wake the poll task if it
+ * moved. While the slider preview holds, the level is shown as set — the point of
+ * the preview is to see the level being chosen, not the level times a ratio. */
+void kbBacklightApply() {
+    int duty;
+    if (s_kbBlPreview) {
+        duty = s_kbBlLevel;                        /* the slider: as set, not ratio-scaled */
+    } else if (!s_kbLit) {
+        duty = 0;
+    } else {
+        int target = lcdBacklightTarget();
+        duty = target > 0 ? (s_kbBlLevel * (int)s_panelDuty + target / 2) / target : 0;
+    }
+    if (duty > 255) duty = 255;
+    /* Dark screen, dark keys — the one write that has to land whatever we believe
+     * we last sent, because an Alt+B we never saw could have lit them. */
+    if (duty == 0 && s_panelDuty == 0) s_kbBlForce = true;
+    if (duty == s_kbBlWant && !s_kbBlForce) return;
+    s_kbBlWant = duty;
+    if (s_pollTask) xTaskNotifyGive(s_pollTask);   /* parked in standby too: it pushes on wake */
+}
+
+void kbPreviewDone(lv_timer_t*) {
+    s_kbBlPreview = nullptr;       /* the one-shot self-deleted after this fire */
+    kbBacklightApply();
+}
+
+/* Dragging the slider lights the keyboard at the level under the thumb, so the
+ * choice can be made by looking at the keys rather than at a number. It lapses
+ * on its own, back to whatever the screen says the lamp should be. Nobody is
+ * looking at a dark screen, so a write to the key from the CLI while the deck
+ * sleeps is not an invitation to light up a pocket. */
+void kbBacklightPreview() {
+    if (s_panelDuty == 0) return;
+    if (s_kbBlPreview) { lv_timer_reset(s_kbBlPreview); return; }
+    s_kbBlPreview = lv_timer_create(kbPreviewDone, KB_BL_PREVIEW_MS, nullptr);
+    lv_timer_set_repeat_count(s_kbBlPreview, 1);
+}
+
+/* lcdBacklightOnChange target (lcd task): the screen moved, so the lamp does. A
+ * screen that has gone out drops the latch with it — the lamp is not owed a
+ * comeback on the next wake, which has its own hold to ask with. */
+void kbBacklightFollow(uint8_t duty) {
+    s_panelDuty = duty;
+    if (duty == 0) s_kbLit = false;
+    kbBacklightApply();
+}
 
 uint32_t mapAsciiKey(uint32_t b) {
     switch (b) {
@@ -846,7 +986,7 @@ void kbCreateIndev(void*);
 
 /* lcd task (via lcdRun): drain the queue through the indev. */
 void kbDrain(void*) {
-    /* Lazy create. tdeckLcdInit() fires lcdRun(kbCreateIndev) right after
+    /* Lazy create. TdeckLcdInput::onInit() fires lcdRun(kbCreateIndev) right after
      * spangapInit(), which can land before the lcd task has registered its
      * LCD_RUN_PORT aux handler — that aux send then fails ("unregistered port")
      * and the indev is never made, so s_indev stays null and every keypress is
@@ -885,34 +1025,70 @@ void pollTask(void*) {
          * stop mid-I2C-transaction holding the shared bus. */
         if (s_standby) {
             ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-            /* Woken while parked: with the glass armed as a wake source that
-             * notify is a touch (the centre button goes to the lcd task), so
-             * ask the controller whether a finger is really there. */
-            if (s_standby && s_touchWakeArmed) tdeckTouchWakeCheck();
+            /* The screen's fade to dark runs on past the moment we park, and the
+             * lamp has to follow it all the way down, so a parked task still
+             * pushes. Each step of the fade notifies us and we park again. */
+            kbBacklightPush();
+            /* Woken while parked by the glass's own edge (the centre button goes
+             * to the lcd task): ask the controller whether a finger is really
+             * there. */
+            if (s_standby && s_touchWakeArmed && s_touchWakeFired) tdeckTouchWakeCheck();
             continue;
         }
         /* Woken by a touch/keyboard INT, or times out to poll. Faster cadence
          * while a finger is down so touch tracking stays smooth. */
         ulTaskNotifyTake(pdTRUE, s_touchDown ? TOUCH_PERIOD : POLL_PERIOD);
+        kbBacklightPush();                 /* before the standby check: the fade starts here */
         if (s_standby) continue;           /* entered standby during the wait */
         /* Touch: sample the GT911 and, on a finger-down edge or a tap to replay,
          * bump the lcd task to read its (event-mode) touch indev. */
         if (tdeckTouchSample()) lcdTouchPoll();
         /* Keyboard: drain up to a queueful per wake — bounded so a wedged keyboard
          * that keeps returning a byte can't spin this task. */
-        bool got = false;
         for (int i = 0; i < 16; i++) {
             uint32_t k = i2cReadKey();
             if (!k) break;
             uint8_t b = (uint8_t)k;
             xQueueSend(s_queue, &b, 0);
-            got = true;
+            s_drainOwed = true;
         }
-        if (got) lcdRun(kbDrain);           /* bump the lcd task to read our indev */
+        /* Bump the lcd task to read our indev. The post is best-effort — a flash
+         * flush can stall the lcd task past its send bound — and the bytes are in
+         * the queue either way, so an owed drain is carried to the next pass (one
+         * POLL_PERIOD away) rather than left for whenever someone presses another
+         * key. kbDrain empties the whole queue, so one landing clears the debt. */
+        if (s_drainOwed && lcdRun(kbDrain)) s_drainOwed = false;
     }
 }
 
 }  // namespace
+
+/* Keyboard lamp, wired from the lcd task's input init (see the note above the
+ * state). The subscription has to be made from the task that should receive it
+ * and from one that outlives boot, which is why this is here and not in onInit
+ * with the rest of the keyboard — the level is pure lcd-task policy, and none of
+ * it needs the I2C device to exist yet. The first call is the stored value, not
+ * somebody moving the slider, so it lights nothing. */
+static void kbBacklightInit(void) {
+    NOW_AND_ON_CHANGE("s.tdeck.kb_backlight", {
+        (void)key;
+        int level = atoi(val);
+        s_kbBlLevel = level < 0 ? 0 : (level > 255 ? 255 : level);
+        s_kbAltWant = s_kbBlLevel;              /* Alt+B lights to the same level */
+        if (s_kbBlSeeded) kbBacklightPreview();
+        s_kbBlSeeded = true;
+        kbBacklightApply();
+    });
+    lcdBacklightOnChange(kbBacklightFollow);    /* calls back at once with the current duty */
+}
+
+/* The lamp's on/off latch (lcd task). Only the held wake press sets it; the
+ * screen going dark clears it. */
+static void kbBacklightSetLit(bool on) {
+    if (s_kbLit == on) return;
+    s_kbLit = on;
+    kbBacklightApply();
+}
 
 /* GT911 INT (GPIO16, ANYEDGE): just wake the poll task, which does the actual
  * GT911 read and then bumps the lcd task. No-op until the poll task exists (the
@@ -933,6 +1109,7 @@ static void IRAM_ATTR tdeckTouchIsr(void*) {
  * gpio_intr_disable() — the driver call takes a non-ISR spinlock. */
 static void IRAM_ATTR tdeckTouchWakeIsr(void* arg) {
     gpio_ll_intr_disable(&GPIO, (gpio_num_t)BOARD_TOUCH_INT_PIN);
+    s_touchWakeFired = true;
     tdeckTouchIsr(arg);
 }
 
@@ -943,6 +1120,7 @@ static void tdeckTouchWakeArm(bool on) {
     gpio_isr_handler_remove((gpio_num_t)BOARD_TOUCH_INT_PIN);
     gpio_isr_handler_add((gpio_num_t)BOARD_TOUCH_INT_PIN,
                          on ? tdeckTouchWakeIsr : tdeckTouchIsr, nullptr);
+    s_touchWakeFired = false;                            /* fresh arm: drop any stale latch */
     if (on) {
         s_touchWakeLevel = gpio_get_level((gpio_num_t)BOARD_TOUCH_INT_PIN) ? 0 : 1;
         pmGpioWakeEnable(BOARD_TOUCH_INT_PIN,
@@ -960,6 +1138,7 @@ static void tdeckTouchWakeArm(bool on) {
  * sample itself is never reported (the touch that wakes must not also click
  * whatever the dark screen was showing). */
 static void tdeckTouchWakeCheck(void) {
+    s_touchWakeFired = false;
     gpio_intr_enable((gpio_num_t)BOARD_TOUCH_INT_PIN);   /* the wake ISR silenced it */
     if (!s_touch || esp_lcd_touch_read_data(s_touch) != ESP_OK) return;
     esp_lcd_touch_point_data_t pt[5] = {};
@@ -980,6 +1159,7 @@ static void tdeckStandby(bool on) {
     if (on) {
         s_touchAsleep = true;                          /* GT911 reads return nothing */
         cancelClickBurst();                            /* no burst survives into sleep */
+        cancelKbHoldTimer();                           /* nor a hold waiting to light the keys */
         /* Drop any latched finger so a press held at sleep time isn't read stale or
          * replayed as a tap on wake. The poll task parks itself on its next loop. */
         taskENTER_CRITICAL(&s_touchMux);
@@ -1048,8 +1228,8 @@ void TdeckLcdInput::onInit() {
     /* Prio 6: one notch above the lcd task (prio 5) so the render can't starve
      * the poll on core 1 — the C3 holds only the last unread key, so a stalled
      * poll drops keystrokes, and a late INT-driven read comes back stale/garbled
-     * (phantom keys). This task now owns ALL of I2C0 (keyboard + touch), off the
-     * lcd task, so the two no longer contend for the bus — and outranking the
+     * (phantom keys). This task owns ALL of I2C0 (keyboard + touch), off the
+     * lcd task, so nothing else contends for the bus — and outranking the
      * render is what keeps touch sampling on cadence while the lcd task is busy
      * (the whole point of moving the read here). The scans are a few short I2C
      * transactions at 10–30 ms, so preempting the render costs it nothing. */

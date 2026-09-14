@@ -5,8 +5,8 @@
  *   - Compile-time hardware constants for the board's bespoke peripherals: the
  *     peripheral power rail, GT911 touch, optical trackball, centre/Home button,
  *     and QWERTY keyboard. Consumed by tdeck.cpp.
- *   - The board bring-up API (`tdeckStart` / `tdeckInit`). tdeck.cpp owns
- *     and starts everything board-specific: the peripheral power rail, the
+ *   - The board's bring-up services (`TdeckBoard`, `TdeckBattery`). tdeck.cpp
+ *     owns and starts everything board-specific: the peripheral power rail, the
  *     shared-SPI CS park, and — when the lcd component is built — the input HAL
  *     (GT911 touch, trackball pointer, centre/Home button) and the ESP32-C3
  *     QWERTY keyboard.
@@ -72,17 +72,25 @@
 #define BOARD_TBOX_RIGHT_PIN    2
 
 /* QWERTY keyboard: an ESP32-C3 keyboard MCU on the shared I2C0 bus, I2C slave
- * 0x55. A 1-byte read returns the next pressed ASCII char (0 = none); INT
- * (GPIO 46) asserts when a key is buffered. The C3 firmware only reports press
- * events — no key-up / hold / repeat. */
+ * 0x55. A 1-byte read returns the next pressed ASCII char (0 = none) and pops
+ * it; only the last unread key is held. The C3 firmware reports press events
+ * only — no key-up / hold / repeat — and never drives its INT (GPIO 46), so the
+ * read is polled. Writes are commands: {0x01,duty} sets the keyboard backlight
+ * (C3 GPIO 9, 0-255, 0 at power-on), {0x03}/{0x04} switch between raw-matrix
+ * and ASCII key mode. See docs/tdeck.md for the full protocol and keycodes. */
 #define BOARD_KB_ADDR           0x55
 #define BOARD_KB_INT_PIN        46
+/* Keyboard write commands. BRIGHTNESS sets the lamp duty now; ALT_B_LEVEL sets
+ * the duty the keyboard's own Alt+B lights to, and the C3 ignores it at 30 or
+ * below. Neither is readable back. */
+#define BOARD_KB_CMD_BRIGHTNESS   0x01
+#define BOARD_KB_CMD_ALT_B_LEVEL  0x02
 
 /**
- * Board bring-up. tdeckStart() is the always-on hardware bring-up: it drives the
- * peripheral power rail HIGH and parks the shared-SPI CS lines (the first
- * shared-bus access is fs_mount_sd() *inside* spangapInit()), so it runs in the
- * start: band, before spangapInit().
+ * Board bring-up. TdeckBoard::onStart() is the always-on hardware bring-up: it
+ * drives the peripheral power rail HIGH and parks the shared-SPI CS lines (the
+ * first shared-bus access is fs_mount_sd() *inside* spangapInit()), so it runs
+ * in the start band, before spangapInit().
  *
  * The on-device-UI input HAL (touch/trackball/button) and the QWERTY keyboard
  * live in conditional/spangap-lcd/src/tdeck_lcd.cpp and run via two
@@ -93,7 +101,7 @@
  */
 class TdeckBoard : public Service {
 public:
-    void onStart() override;   /* was tdeckStart */
+    void onStart() override;   /* power rail + shared-SPI CS park, before spangapInit() */
     void onInit()  override;   /* publishes sys.board once storage is up */
 };
 
@@ -105,7 +113,7 @@ public:
  */
 class TdeckBattery : public Service {
 public:
-    void onInit() override;    /* was tdeckBatteryInit */
+    void onInit() override;    /* ADC, first sample, and the 1/min timer */
 };
 
 /**

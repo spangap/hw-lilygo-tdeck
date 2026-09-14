@@ -7,8 +7,9 @@ changing the board code without breaking the bring-up. It is self-authoritative.
 ## 1. What this straddle adds
 
 A non-buildable spangap component (`idf_component_register`, no `app_main`). It
-exports a handful of hook symbols the buildable's generated dispatcher calls, and
-publishes the board's hardware description as `kconfig:` values and storage keys.
+exports a handful of `Service` subclasses the buildable's generated `app_main`
+constructs and walks, and publishes the board's hardware description as
+`kconfig:` values and storage keys.
 Source layout:
 
 ```
@@ -35,30 +36,32 @@ only on an LCD build, `tdeck_audio.cpp` only on an audio build.
 
 Everything here is new (a board contributes hardware, not protocol). The subsystems:
 
-- **Peripheral power rail + shared-SPI chip-select park** (`tdeckStart`/`tdeckPowerInit`).
+- **Peripheral power rail + shared-SPI chip-select park** (`TdeckBoard::onStart`
+  → `tdeckPowerInit`).
 - **Shared I2C0 master bus** (`tdeckI2cBus`) — keyboard, touch, audio codec.
-- **Battery monitor** (`tdeckBatteryInit`) — ADC + curve + 1/min timer.
-- **On-device input HAL** (`tdeckLcdStart`/`tdeckLcdInit`) — touch, trackball
-  pointer, centre button, QWERTY keyboard.
-- **ES7210 mic codec shim** (`tdeckAudioInit`) — I2C register programming for the
+- **Battery monitor** (`TdeckBattery`) — ADC + curve + 1/min timer.
+- **On-device input HAL** (`TdeckLcdInput`) — touch, trackball pointer, centre
+  button, QWERTY keyboard and its lamp.
+- **ES7210 mic codec shim** (`TdeckAudio`) — I2C register programming for the
   audio engine.
 
 ## 2. Bring-up ordering
 
-The hooks run in two bands (declared in `straddle.yaml`):
+The services are listed in `straddle.yaml` and walked in two bands:
 
 ```
-start:  tdeckStart            (always)
-        tdeckLcdStart         (when spangap-lcd)
-init:   tdeckLcdInit          (when spangap-lcd)
-        tdeckAudioInit        (when spangap/audio)
-        tdeckBatteryInit      (always)
+start:  TdeckBoard::onStart       (always)
+        TdeckLcdInput::onStart    (when spangap-lcd)
+init:   TdeckBoard::onInit        (always)
+        TdeckLcdInput::onInit     (when spangap-lcd)
+        TdeckAudio::onInit        (when spangap/audio)
+        TdeckBattery::onInit      (always)
 ```
 
 (The GNSS task is gps's own `GpsService`, registered at that straddle's
 init_order position.)
 
-**`tdeckStart` is the only `start:`-band board hook that must run before
+**`TdeckBoard::onStart` is the only board work that must run before
 `spangapInit()`.** The first shared-SPI-bus transaction is `fs_mount_sd()`
 *inside* `spangapInit()`, and it fails (`ESP_ERR_TIMEOUT`) unless two things are
 already true:
@@ -74,15 +77,15 @@ already true:
    The SX1262 CS especially: the power rail is now up so the chip is live, but
    `loraInit()` (which would own its CS) runs long after the SD probe.
 
-`tdeckStart` also creates the shared **I2C0** bus eagerly, while still
+`TdeckBoard::onStart` also creates the shared **I2C0** bus eagerly, while still
 single-threaded, so the touch (LCD task), keyboard (poll task) and codec (audio
 task) can't race `i2c_new_master_bus()` on the same port. `tdeckI2cBus()` is
 otherwise lazy / first-caller-wins.
 
-`tdeckLcdStart` registers the input HAL with the LCD component **before**
-`lcdInit()` runs inside `spangapInit()`, so the component can wire touch /
-trackball / button when it brings the panel up. `tdeckLcdInit` brings up the
-keyboard **after** `spangapInit()`, because the keyboard needs the LCD task to
+`TdeckLcdInput::onStart` registers the input HAL with the LCD component
+**before** `lcdInit()` runs inside `spangapInit()`, so the component can wire
+touch / trackball / button when it brings the panel up. Its `onInit` brings up
+the keyboard **after** `spangapInit()`, because the keyboard needs the LCD task to
 exist (it creates and drives an LVGL indev via `lcdRun()`).
 
 ## 3. Battery monitor (`tdeck.cpp`)
@@ -91,7 +94,7 @@ exist (it creates and drives an LVGL indev via `lcdRun()`).
 divider (100k/100k) that sits **upstream** of the power-enable gate — it has no
 enable, conducts continuously (~21 µA @ 4.2 V), and so needs no power-up step.
 
-`tdeckBatteryInit` (init band, needs storage up) configures the ADC with curve-
+`TdeckBattery::onInit` (init band, needs storage up) configures the ADC with curve-
 fitting calibration (falling back to nominal 12-bit scaling if calibration is
 unavailable), publishes an initial reading, and arms a `esp_timer` that re-reads
 once a minute on the timer task — **no dedicated task**. Each read averages 16
@@ -110,16 +113,24 @@ Re-measure the curve, or trim `BAT_DIV_NUM/DEN`, if a multimeter disagrees.
 
 This file exists only on an LCD build. It registers the board's `lcd_input_t`
 ops (`init`, `touch_read`, `pointer_read`, `click_read`) with the LCD component
-via `lcdSetInput()` in `tdeckLcdStart`; the component owns the panel, the cursor,
+via `lcdSetInput()` in `TdeckLcdInput::onStart`; the component owns the panel, the cursor,
 the focus group and the shell — see [spangap-lcd](../spangap-lcd) for the
 `LcdApp`/launcher/statusbar model. The board supplies only input hardware.
 
 **The LCD-owned indevs are interrupt-driven.** Touch, trackball and button are
-`LV_INDEV_MODE_EVENT`, so LVGL runs no read timer. The board attaches the
-component's exported `lcdInputISR` to each INT line; the ISR only flags +
-`vTaskNotifyGiveFromISR`s the LCD task, which reads the indev once. Idle LCD CPU
-is ~0 %. The shared GPIO ISR service is installed `ESP_INTR_FLAG_IRAM` (the same
-flag LoRa's DIO1 path uses) so the IRAM-safe ISR survives cache-disabled windows.
+`LV_INDEV_MODE_EVENT`, so LVGL runs no read timer. Every edge ends at the
+component's exported `lcdInputISR` — the button's INT line straight (through
+`tdeckStandbyBtnISR` while armed for wake), the trackball's four through
+`tboxIsr`, which counts the pulse first — and it only flags +
+`vTaskNotifyGiveFromISR`s the LCD task, which reads the indevs once. The GT911's
+INT is the one that does not: it wakes the poll task (`tdeckTouchIsr`) to do the
+I2C off the render path, and the latched sample reaches the LCD task through
+`lcdTouchPoll()`, the same flag-and-notify from task context. The keyboard is the
+only input that travels as an `lcdRun` hop (§4.4), and it carries the debt for a
+post that doesn't land, because that one can be dropped where a notify cannot.
+Idle LCD CPU is ~0 %. The shared GPIO ISR service is installed
+`ESP_INTR_FLAG_IRAM` (the same flag LoRa's DIO1 path uses) so the IRAM-safe ISRs
+survive cache-disabled windows.
 
 ### 4.1 GT911 touch
 
@@ -242,21 +253,26 @@ indev model, so it lives in the consumer, not spangap-core:
 - The 1-byte read is **destructive** (pops the key, returns 0 when empty, no
   peek/count), so you can't tell a key is pending without consuming it.
 
-So a dedicated low-prio `kbpoll` task (**prio 3, core 1**) polls the I2C off the
+So a dedicated `kbpoll` task (**prio 6, core 1**) polls the I2C off the
 LCD task at a fixed `POLL_PERIOD` (30 ms). The C3 holds only the last unread
 key (no buffer), so a lazy/adaptive backoff drops keystrokes under fast typing;
 standby parks the task, so the always-on scan costs nothing while asleep.
 It buffers bytes into a queue and bumps the LCD task via `lcdRun(kbDrain)` to
-drain them through an LVGL keypad indev joined to `lcdInputGroup()`. Prio 3 is
-one notch above the LCD task so a long synchronous redraw can't starve the poll
-(the C3 holds only the last unread key); not higher, because the read takes the
-shared I2C0 bus (touch, codec). `lcdSetHasKeyboard(true)` tells the component to
-suppress the on-screen keyboard.
+drain them through an LVGL keypad indev joined to `lcdInputGroup()`. That bump is
+best-effort (a flash flush can stall the LCD task past `lcdRun`'s send bound), and
+the bytes are queued either way, so a failed post leaves the drain *owed* and the
+next pass — one `POLL_PERIOD` later — re-posts it, rather than stranding those keys
+until someone presses another. Prio 6 is
+one notch above the LCD task (prio 5) so a long synchronous redraw can't starve
+the poll. The same task samples the GT911 — touch and keyboard are the only two
+peripherals on I2C0, so one owner means no bus contention, and outranking the
+render is what keeps touch sampling on cadence while the LCD task is busy.
+`lcdSetHasKeyboard(true)` tells the component to suppress the on-screen keyboard.
 
 GPIO 46 is still wired `ANYEDGE`: an edge wakes the poll early and is counted
 for the `kbint` diagnostic (useful if a future C3 firmware ever drives it).
 The indev is created lazily
-in `kbDrain` (not in `tdeckLcdInit`): `tdeckLcdInit` fires `lcdRun(kbCreateIndev)`
+in `kbDrain` (not in `TdeckLcdInput::onInit`): that `onInit` fires `lcdRun(kbCreateIndev)`
 right after `spangapInit()`, which can land before the LCD task has registered
 its `LCD_RUN_PORT` aux handler, so the create can silently fail; `kbDrain` runs
 only once the LCD task is fully up, making it the race-proof place to build it.
@@ -264,6 +280,53 @@ The `readCb` synthesizes press+release over two reads and decodes a `0x0C` prefi
 (Alt-C) as a one-shot "next lowercase is `LCD_KEY_CTRL | letter`" lead-in (1 s
 window) for the terminal. A keystroke that woke the screen is swallowed (it only
 served to wake).
+
+### 4.5 Keyboard lamp
+
+The keys are lit by the C3's own GPIO 9 at a PWM duty it sets on command `0x01`;
+the host has a two-byte write and nothing else — no read-back, no state. So the
+lamp is **driven by intent, not held at a level**: we say what it should be at
+each moment the screen changes and say nothing in between.
+
+**Whether the lamp is wanted at all is a latch (`s_kbLit`), and only a HELD wake
+press sets it.** The waking press is already absorbed until it lifts, so that
+window is free to carry a second meaning: `armKbHoldTimer()` on the press,
+`cancelKbHoldTimer()` on the lift, and `kStandbyHoldMs` (300 ms) in between —
+reusing the hold that sleeps the deck, in the other direction. The screen is
+never made to wait for it: `sys.standby` is cleared the moment the press lands
+and only the keys watch the clock. A tap therefore wakes the screen alone, which
+is the point — waking a deck to glance at it should not light a keyboard.
+
+Once lit it follows `lcdBacklightOnChange` (spangap-lcd), which reports every panel
+duty on the LCD task. The wanted duty is `s.tdeck.kb_backlight` scaled by
+`panel duty / lcdBacklightTarget()`: the same proportional cut at the dim step,
+dark before the panel powers off. Reaching 0 also **clears the latch**, so each
+trip out of standby has to ask again rather than inheriting the last one.
+The LCD task only computes it; the **`kbpoll` task does the write**, because it
+owns I2C0 — which is also why a parked task still pushes: the fade to dark runs on
+past the moment standby parks it, and each step of that fade notifies it awake for
+one write. A notify is therefore no longer proof that the glass fired, hence
+`s_touchWakeFired`: only the GT911's own edge earns a `tdeckTouchWakeCheck`.
+
+**A duty already written is never rewritten**, and that is the whole of the Alt+B
+story. The C3 handles Alt+B itself and sends no byte, so the lamp can change
+without us knowing; not rewriting means an Alt+B *stands* until the screen next
+changes state, instead of being stamped back out within 30 ms. `0x02` keeps Alt+B's
+own on-duty at the configured level so both routes light the keys the same.
+
+The exception is `s_kbBlForce`, set whenever the computed duty and the panel duty
+are both 0: **the write that takes the lamp out with the screen always lands**. A
+deck must not sleep with lit keys, and an Alt+B we never saw is exactly how it
+otherwise could — our cache would say 0, the keys would say otherwise, and nothing
+would correct it. There is no way to read the lamp back in key mode; raw-matrix
+mode would make the combo visible (`docs/tdeck.md`), which is the fix if this ever
+needs to be exact rather than merely safe.
+
+Moving the slider lights the keys at the level under the thumb for 3 s
+(`KB_BL_PREVIEW_MS`) — a level is a thing you judge by looking at the keys, not at
+a number — and that preview shows the level as set rather than ratio-scaled, since
+the point is the level being chosen. It is suppressed while the panel is dark, so
+a write to the key from the CLI can't light a deck in somebody's pocket.
 
 ## 5. ES7210 mic codec shim (`conditional/audio/tdeck_audio.cpp`)
 
@@ -274,7 +337,7 @@ I2C-controlled input codec, this slice. The ES7210 is a quad-mic ADC on I2C0
 the ES7210 just clocks ADC samples onto DIN once its registers are programmed. So
 `es7210InInit` is pure I2C register programming, no I2S; slave mode needs no
 sample-rate coefficient table (the chip derives serial clocks from the supplied
-BCLK/WS), so the init sequence is rate-independent. `tdeckAudioInit` (init band)
+BCLK/WS), so the init sequence is rate-independent. `TdeckAudio::onInit` (init band)
 only stows the `audio_codec_ops_t` with the engine via `audioRegisterCodec`; the
 audio task applies them lazily on first capture. The register table configures
 16-bit I2S-slave, all four mics at a fixed gain (regs 0x43–0x46), HPF on. Of the
@@ -282,9 +345,9 @@ four hardware mics only one is populated on the board (the rest are unconnected)
 
 ## 6. Pitfalls
 
-- **`tdeckStart` before `spangapInit()`.** Power rail + chip-select park must precede the
-  SD mount; this is the whole reason for the `start:` band. Don't reorder it into
-  `init:`.
+- **`TdeckBoard::onStart` before `spangapInit()`.** Power rail + chip-select park must
+  precede the SD mount; this is the whole reason the board does anything in the
+  start band. Don't move it to `onInit`.
 - **Keep FreeRTOS sync objects out of PSRAM.** Internal DRAM/DMA is scarce on the
   T-Deck; queues/stream-buffers/mutexes in PSRAM trip the `S32C1I` spinlock
   assert. Task stacks and large buffers go in PSRAM (`STACK_PSRAM`); sync objects

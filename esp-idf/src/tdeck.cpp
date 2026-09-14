@@ -6,11 +6,11 @@
  *
  *   1. Peripheral power rail + shared-SPI CS park.
  *      Always compiled — SD and LoRa need the +3.3 V rail even with no on-device
- *      UI. Driven from tdeckStart() before spangapInit().
+ *      UI. Driven from TdeckBoard::onStart() before spangapInit().
  *   2. [CONFIG_SPANGAP_LCD] ST7789V display + GT911 touch + trackball pointer +
  *      centre/Home button, registered as the lcd component's board HAL.
  *   3. [CONFIG_SPANGAP_LCD] QWERTY keyboard (ESP32-C3 @ I2C 0x55), end to end.
- *   4. The two-phase public API (tdeckStart / tdeckInit).
+ *   4. The board's services (TdeckBoard across both bands, TdeckBattery).
  */
 #include "tdeck.h"
 #include "i2c_helper.h"     /* SPANGAP_I2C_PULLUP (shared bus wiring policy) */
@@ -123,9 +123,9 @@ i2c_master_bus_handle_t tdeckI2cBus(void) {
 }
 
 /* =========================================================================
- * On-device UI input HAL (touch / trackball / button / keyboard) now lives in
+ * On-device UI input HAL (touch / trackball / button / keyboard) lives in
  * conditional/spangap-lcd/src/tdeck_lcd.cpp — compiled only when spangap-lcd is
- * staged, registered via the tdeckLcdStart / tdeckLcdInit when: hooks. No #if.
+ * staged, registered as the when: spangap-lcd TdeckLcdInput service. No #if.
  *
  * Public API — the always-on board bring-up (see tdeck.h).
  * ========================================================================= */

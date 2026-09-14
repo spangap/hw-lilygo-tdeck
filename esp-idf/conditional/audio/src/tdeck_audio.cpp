@@ -9,8 +9,8 @@
  * So in_init() is pure I2C register programming — no I2S here.
  *
  * Compiled and linked ONLY when spangap/audio is staged (it lives under
- * esp-idf/conditional/audio/), and called from the `when: spangap/audio` init
- * hook tdeckAudioInit, which just stows the ops pointer with the engine.
+ * esp-idf/conditional/audio/), and reached through the `when: spangap/audio`
+ * TdeckAudio service, whose onInit just stows the ops pointer with the engine.
  *
  * BENCH-VERIFY: the register table below configures
  * the ES7210 for 16-bit I2S-slave operation with all four mics enabled at a

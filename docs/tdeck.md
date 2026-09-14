@@ -1,7 +1,9 @@
 # T-Deck — the `tdeck` board module, plus a hardware/firmware reference
 
 This file documents reticulous's **`tdeck` board-support module** first
-(`main/tdeck.cpp` + `main/tdeck.h`), then — below the divider — the exhaustive
+(`esp-idf/src/tdeck.cpp` + `esp-idf/include/tdeck.h`, plus the lcd-conditional
+slice `esp-idf/conditional/spangap-lcd/src/tdeck_lcd.cpp`), then — below the
+divider — the exhaustive
 **hardware and firmware reference** the module is built from: every T-Deck
 variant's pin map, and architecture notes on `ratspeak/ratdeck`, the
 Reticulum/LXMF firmware we learn from but don't copy. Sources are cited per
@@ -209,29 +211,38 @@ and `meshtastic/firmware/variants/esp32s3/t-deck/variant.h`.
     (not scroll/keys) with an auto-hiding cursor — see
     [§1.8](#18-reticulous-on-device-ui--how-we-wire-it).
 - **Keyboard:** physical QWERTY membrane keyboard with backlight.
-  Keys are scanned by the on-keyboard ESP32-C3, which exposes a
-  tiny I2C-slave protocol. Host reads the next pressed character
-  with `Wire.requestFrom(0x55, 1)` — a **destructive** read (pops the key;
-  returns `0` when empty, with no peek/count), so you can't tell a key is
-  pending without consuming it. Asking for more than 1 byte returns garbage on
-  stock firmware. Keyboard backlight is driven by the C3's own GPIO; no separate
-  BL pin on the host. Sources: `rgrizzell/lilygo-t-deck-keyboard` and the LilyGo
-  `firmware/` tree.
+  Keys are scanned by the on-keyboard ESP32-C3, which exposes a tiny
+  I2C-slave protocol at `0x55`: a **read** pops the next character, a
+  **write** is a command (backlight duty, raw-matrix mode). Both directions,
+  and every byte the keyboard can emit, are in
+  [Keyboard protocol and keycodes](#keyboard-protocol-and-keycodes-c3-firmware)
+  below. The read (`Wire.requestFrom(0x55, 1)`) is **destructive** (pops the
+  key; returns `0` when empty, with no peek/count), so you can't tell a key is
+  pending without consuming it, and in the default key mode only one byte is
+  ever queued — asking for more returns garbage. The backlight hangs off the
+  C3's own GPIO 9 (no BL pin on the host), but it is **not** out of the host's
+  reach: a two-byte I2C write sets its PWM duty, and `Alt`+`B` toggles it on
+  the C3 with no host involvement at all. Sources: LilyGo's
+  `examples/Keyboard_ESP32C3/Keyboard_ESP32C3.ino` (the stock firmware, read
+  directly) and `rgrizzell/lilygo-t-deck-keyboard`.
   **No usable keyboard interrupt:** `GPIO 46` is wired as the alleged keyboard
   INT, but the C3 firmware never drives it — verified on hardware (the pin never
   moves on a keypress) *and* in the C3 source (`INT_PIN` is defined but never
   written; LilyGo's own "keyboard interrupt" issue #9 was closed unanswered).
-  Because of all this, the keyboard is **owned by the board module
-  ([`main/tdeck.cpp`](../main/tdeck.cpp))**, not the generic `lcd` component
-  (touch/trackball/button stay interrupt-driven there). It runs a dedicated
-  low-prio task that polls the I2C off the lcd task (~30 ms while typing, ~200 ms
-  idle — the C3 buffers keys, so a lazy poll only delays the first keypress),
-  buffers keys into a queue, and bumps the lcd task via `lcdRun()` to drain them
-  through its own LVGL keypad indev (joined to `lcdInputGroup()`); it tells lcd
-  `lcdSetHasKeyboard(true)` so Settings edits text in place. `GPIO 46` is still
-  wired: the **first edge ever seen flips the reader from polling to
-  interrupt-driven** (self-healing if a future C3 firmware drives it). See
-  [§1.8](#18-reticulous-on-device-ui--how-we-wire-it).
+  Because of all this, the keyboard is **owned by the board's lcd slice
+  ([`tdeck_lcd.cpp`](../esp-idf/conditional/spangap-lcd/src/tdeck_lcd.cpp))**,
+  not the generic `lcd` component (touch/trackball/button stay interrupt-driven
+  there). Its `kbpoll` task (prio 6, core 1 — one notch above the lcd task)
+  polls the I2C off the lcd task at a fixed 30 ms: the stock C3 holds only the
+  *last* unread key, so any idle backoff drops keystrokes under fast typing,
+  and standby parks the task outright so the always-on scan costs nothing
+  asleep. It buffers keys into a queue and bumps the lcd task via `lcdRun()` to
+  drain them through its own LVGL keypad indev (joined to `lcdInputGroup()`);
+  it tells lcd `lcdSetHasKeyboard(true)` so Settings edits text in place. The
+  same task samples the GT911, so one task owns all of I2C0. `GPIO 46` is still
+  wired `ANYEDGE`: an edge wakes the poll early and is counted for the `kbint`
+  diagnostic, so a future C3 firmware that drives it costs the host nothing.
+  See [§1.8](#18-reticulous-on-device-ui--how-we-wire-it).
   **Path to interrupt-driven (C3-side fix):** the S3 needs *no* changes — the
   self-healing ISR path above is already waiting for the edge; the fix is entirely
   in the reflashable C3 ([§1.2](#12-t-deck-original--full-spec)). A corrected C3
@@ -249,6 +260,136 @@ and `meshtastic/firmware/variants/esp32s3/t-deck/variant.h`.
   un-reflashed units.
 - Buttons: physical RST (hardware), BOOT (= GPIO 0 = trackball
   click).
+
+#### Keyboard protocol and keycodes (C3 firmware)
+
+Everything below is read off LilyGo's stock sketch,
+`Xinyuan-LilyGO/T-Deck` → `examples/Keyboard_ESP32C3/Keyboard_ESP32C3.ino`
+(the shipped binaries are `firmware/T-Keyboard_Keyboard_ESP32C3_*.bin`). The
+S3 is I2C master, the C3 is a slave at `0x55`, 100 kHz, on the shared I2C0:
+
+```
+S3 → C3   [0x01, duty]      backlight PWM duty, 0-255; 0 = off
+S3 → C3   [0x02, duty]      the duty Alt+B turns *on* to; ignored unless > 30
+S3 → C3   [0x03]            enter raw-matrix mode
+S3 → C3   [0x04]            return to key mode (the power-on default)
+S3 ← C3   read 1 byte       key mode: next character, 0x00 = none — pops it
+S3 ← C3   read 5 bytes      raw mode: one bitmap per column, bit r = row r held
+```
+
+**Backlight.** The lamps are on **C3 GPIO 9**, driven by the C3's LEDC (LED
+control) peripheral, channel 0, 1 kHz, 8-bit. Boot duty is **0**, so the
+keyboard comes up dark every power-on and stays dark until something asks
+otherwise — which is why an untouched T-Deck looks like it has no backlight at
+all. Two things turn it on:
+
+- **`Alt`+`B` on the keyboard itself.** Handled entirely on the C3: it toggles,
+  and the keypress is swallowed (no character reaches the host). Lighting up
+  uses the last duty set over I2C, or `0x02`'s value (default **127**) when
+  that is zero — so the combo always lights something.
+- **The host, over I2C:** write `[0x01, duty]`. That is the whole of it; there
+  is no read-back of the current duty, and the C3 forgets it on reset. On
+  reticulous this is wired to the panel backlight — see
+  [§1.8](#18-reticulous-on-device-ui--how-we-wire-it).
+
+Gotcha in the stock sketch: `case 0x01` has no `break` and falls into
+`case 0x02`. The two-byte write above is safe (the fall-through finds no byte
+to read), but a *three*-byte `[0x01, duty, alt_duty]` sets both values in one
+transaction.
+
+**Matrix.** 5 columns × 7 rows, scanned by driving one column LOW and reading
+the rows with pull-ups, 1 ms settle per row — so a full scan is ~35 ms and
+that, not the host's poll, is the floor on key latency. There are no diodes:
+three-key combinations that form a rectangle in the matrix ghost.
+
+- Columns (driven): C3 GPIO **1, 4, 5, 11, 13**
+- Rows (read): C3 GPIO **0, 3, 19, 12, 18, 6, 7**
+
+GPIO 18/19 are the C3's native USB D-/D+, spent here on matrix rows — which is
+why the C3 has no USB and must be reflashed over the 6-pin UART header.
+
+**Keycodes.** In key mode the C3 sends one byte per *press edge* (no auto-repeat
+— holding a key emits exactly one byte). Modifiers are sampled at that instant
+and never reported on their own. `Sym` selects the symbol map; `Shift` (either
+one) then subtracts 32 from whatever character that produced — including from
+symbols, which is where the control codes in the last column come from.
+
+| (col,row) | Key | base | `Shift` | `Sym` | `Shift`+`Sym` |
+|---|---|---|---|---|---|
+| 0,0 | Q | `q` 0x71 | `Q` 0x51 | `#` 0x23 | 0x03 |
+| 0,1 | W | `w` 0x77 | `W` 0x57 | `1` 0x31 | 0x11 |
+| 0,2 | **Sym** | modifier only | | | |
+| 0,3 | A | `a` 0x61 | `A` 0x41 | `*` 0x2A | 0x0A |
+| 0,4 | **Alt** | modifier only | | | |
+| 0,5 | Space | 0x20 | 0x00 (none) | 0x00 (none) | 0xE0 |
+| 0,6 | Mic | 0x00 (none) | 0xE0 | `0` 0x30 | 0x10 |
+| 1,0 | E | `e` 0x65 | `E` 0x45 | `2` 0x32 | 0x12 |
+| 1,1 | S | `s` 0x73 | `S` 0x53 | `4` 0x34 | 0x14 |
+| 1,2 | D | `d` 0x64 | `D` 0x44 | `5` 0x35 | 0x15 |
+| 1,3 | P | `p` 0x70 | `P` 0x50 | `@` 0x40 | 0x20 (space) |
+| 1,4 | X | `x` 0x78 | `X` 0x58 | `8` 0x38 | 0x18 |
+| 1,5 | Z | `z` 0x7A | `Z` 0x5A | `7` 0x37 | 0x17 |
+| 1,6 | **Left Shift** | modifier only | | | |
+| 2,0 | R | `r` 0x72 | `R` 0x52 | `3` 0x33 | 0x13 |
+| 2,1 | G | `g` 0x67 | `G` 0x47 | `/` 0x2F | 0x0F |
+| 2,2 | T | `t` 0x74 | `T` 0x54 | `(` 0x28 | 0x08 (BS) |
+| 2,3 | **Right Shift** | modifier only | | | |
+| 2,4 | V | `v` 0x76 | `V` 0x56 | `?` 0x3F | 0x1F |
+| 2,5 | C | `c` 0x63 | `C` 0x43 | `9` 0x39 | 0x19 |
+| 2,6 | F | `f` 0x66 | `F` 0x46 | `6` 0x36 | 0x16 |
+| 3,0 | U | `u` 0x75 | `U` 0x55 | `_` 0x5F | `?` 0x3F |
+| 3,1 | H | `h` 0x68 | `H` 0x48 | `:` 0x3A | 0x1A |
+| 3,2 | Y | `y` 0x79 | `Y` 0x59 | `)` 0x29 | 0x09 (Tab) |
+| 3,3 | Enter | 0x0D | 0x0D | 0x0D | 0x0D |
+| 3,4 | B | `b` 0x62 | `B` 0x42 | `!` 0x21 | 0x01 |
+| 3,5 | N | `n` 0x6E | `N` 0x4E | `,` 0x2C | 0x0C |
+| 3,6 | J | `j` 0x6A | `J` 0x4A | `;` 0x3B | 0x1B (ESC) |
+| 4,0 | O | `o` 0x6F | `O` 0x4F | `+` 0x2B | 0x0B |
+| 4,1 | L | `l` 0x6C | `L` 0x4C | `"` 0x22 | 0x02 |
+| 4,2 | I | `i` 0x69 | `I` 0x49 | `-` 0x2D | 0x0D (Enter) |
+| 4,3 | Backspace | 0x08 | 0x08 | 0x08 | 0x08 |
+| 4,4 | `$` / speaker | `$` 0x24 | 0x04 | 0x00 (none) | 0xE0 |
+| 4,5 | M | `m` 0x6D | `M` 0x4D | `.` 0x2E | 0x0E |
+| 4,6 | K | `k` 0x6B | `K` 0x4B | `'` 0x27 | 0x07 |
+
+Enter and Backspace are special-cased ahead of the character maps, so no
+modifier changes them. Two combos are handled on the C3 instead of being mapped:
+`Alt`+`B` (backlight, emits nothing) and **`Alt`+`C` → 0x0C**, which is the only
+way `Alt` is ever visible to the host — every other `Alt`+key sends the plain
+character. The 0xE0 entries are the sketch subtracting 32 from an unmapped key's
+0x00; 0x00 itself is indistinguishable from "no key pending".
+
+**Characters the stock firmware cannot type at all:** `%` `&` `<` `=` `>` `[`
+`\` `]` `^` `` ` `` `{` `|` `}` `~`. There is no `Tab`, `Esc`, `Ctrl`, arrow or
+function key either — the four control bytes reachable by name above
+(0x08 / 0x09 / 0x1B / 0x0D, via `Shift`+`Sym`) are accidents of the −32 rule,
+not designed keys.
+
+**Raw mode is the way out of all of this.** After `[0x03]`, a 5-byte read
+returns the live state of all 35 switch positions, non-destructively: no key is
+ever popped, so nothing can be dropped by a lazy poll; `Alt`, `Sym`, both
+`Shift`s and `Mic` become readable as state; and the host maps keys itself, so
+the missing characters, repeat, and key-up are the host's to define. The cost is
+that the host takes over debounce and edge detection, and a 5-byte read replaces
+a 1-byte one. It needs no reflash — raw mode is in the shipped firmware (added
+2025-06-12; backlight control was added 2024-12-25, so both want a recent C3
+build).
+
+**`rgrizzell/lilygo-t-deck-keyboard` differs** where it matters, so a reflashed
+unit is not wire-compatible with the table above: Enter is **0x0A** (not 0x0D),
+`Sym`+`Backspace` is **0x7F** (Delete), the Ctrl-prefix combo is **`Alt`+`L`**
+(not `Alt`+`C`, though it is the same 0x0C byte), `Shift` applies only to
+lowercase letters — so none of the `Shift`+`Sym` control codes exist — and keys
+go into a real FIFO instead of a single slot, which removes the dropped-keystroke
+pressure on the host's poll rate. Its backlight is plain on/off on GPIO 9, not
+PWM: `[0x01, state]`, or a bare `[0x01]` to toggle. It has no raw mode. It
+defines `INT_PIN` 46 and never writes it, exactly as the stock sketch has no INT
+at all.
+
+**The C3's own console.** It logs at 115200 on the 6-pin header (pin order from
+the RST end: TX, RX, BOOT, RST, GND, VCC) — every key, every I2C command, and
+its mode changes. Useful when the S3 side sees nothing and you need to know
+which end is silent. The C3 runs at 80 MHz and uses none of its Wi-Fi or BLE.
 
 #### Radio (LoRa)
 
@@ -715,7 +856,7 @@ set. The software architecture (LVGL bring-up, the lcd task loop, the focus
 group, Settings panes, the panel Kconfig + input HAL contract) lives in
 [../../spangap/docs/lcd.md](../../spangap/docs/lcd.md). This section is only the
 **T-Deck Plus hardware wiring** behind that contract; the board layer is
-[../main/tdeck.cpp](../main/tdeck.cpp).
+[../esp-idf/src/tdeck.cpp](../esp-idf/src/tdeck.cpp).
 
 **Display.** ST7789V (320×240, RGB565) on the shared SPI2 bus via `esp_lcd` —
 CS 12, DC 11, no RST (resets with the +3.3 V rail behind GPIO 10), backlight LEDC
@@ -733,16 +874,17 @@ task (whose `itsPoll` blocks on that notification), which then reads the indev
 once. With nothing held, idle lcd CPU is **~0 %** (it pauses any released indev's
 LVGL read timer each loop so a missed pointer release-pause can't leave LVGL
 auto-reading at 30 Hz). The **keyboard can't join this model** (dead INT +
-destructive read), so it lives in the board module
-([`main/tdeck.cpp`](../main/tdeck.cpp)): its own poll task does the I2C off the
-lcd task and bumps lcd via `lcdRun()`.
+destructive read), so it lives in the board's lcd slice
+([`tdeck_lcd.cpp`](../esp-idf/conditional/spangap-lcd/src/tdeck_lcd.cpp)): its
+own `kbpoll` task does the I2C off the lcd task and bumps lcd via `lcdRun()`.
+That task also samples the GT911, so the touch read is off the render path too.
 
 | Device | INT pin(s) | Edge | Read path | LVGL indev | Owner |
 |---|---|---|---|---|---|
-| GT911 touch | GPIO 16 | `ANYEDGE` | I2C via `esp_lcd_touch` → `touch_read` (raw native; lcd rotates) | pointer | `tdeck.cpp` input HAL |
-| Trackball — 4 direction lines | GPIO 3 / 15 / 1 / 2 (U/D/L/R) | `NEGEDGE` | count falling edges → cursor position (`pointer_read`) | pointer (visible cursor) | `tdeck.cpp` input HAL |
-| Centre button | GPIO 0 | `ANYEDGE` | `gpio_get_level` → `click_read` (board owns click-vs-300ms-hold → `lcdGoHome`) | → the trackball pointer's click | `tdeck.cpp` input HAL |
-| QWERTY keyboard (C3) | GPIO 46 (dead — see above) | `ANYEDGE` | I2C 1-byte read @ `0x55`, **polled** | keypad | `tdeck.cpp` (not lcd) |
+| GT911 touch | GPIO 16 | `ANYEDGE` | I2C via `esp_lcd_touch` on the `kbpoll` task → latch → `touch_read` (raw native; lcd rotates) | pointer | `tdeck_lcd.cpp` input HAL |
+| Trackball — 4 direction lines | GPIO 3 / 15 / 1 / 2 (U/D/L/R) | `NEGEDGE` | count falling edges → cursor position (`pointer_read`) | pointer (visible cursor) | `tdeck_lcd.cpp` input HAL |
+| Centre button | GPIO 0 | `ANYEDGE` | `gpio_get_level` → `click_read` (board owns click-vs-300ms-hold → `lcdGoHome`) | → the trackball pointer's click | `tdeck_lcd.cpp` input HAL |
+| QWERTY keyboard (C3) | GPIO 46 (dead — see above) | `ANYEDGE` | I2C 1-byte read @ `0x55`, **polled** (`kbpoll`, 30 ms) | keypad | `tdeck_lcd.cpp` (not lcd) |
 
 - **`ANYEDGE` for touch / button / keyboard INT:** INT polarity is sub-revision /
   C3-firmware dependent, and a redundant edge just costs one empty read. The
@@ -760,7 +902,7 @@ lcd task and bumps lcd via `lcdRun()`.
   rate is a **time-decayed EMA** (`TB_VEL_TAU_US` ≈ 120 ms): a short gap barely
   moves it, a long gap decays it to zero so the first nudge after a pause stays
   precise. `TB_VEL_FULL` (pulses/sec for full speed) and `TB_VEL_TAU_US` are
-  compile-time tunables in [tdeck.cpp](../main/tdeck.cpp); the slider sets
+  compile-time tunables in [tdeck.cpp](../esp-idf/src/tdeck.cpp); the slider sets
   the fast-end ceiling. **reticulous owns the whole pointing device** — both the
   curve and the settings (`s.tdeck.*`). spangap-core stays generic: it only knows
   the `pointer_read` HAL hook and draws the cursor — it owns no pointer config.
@@ -770,17 +912,33 @@ lcd task and bumps lcd via `lcdRun()`.
   Home), so on a board with `pointer_read` lcd does **not** create a keypad button
   indev. **Direction→pin and ball orientation are sub-revision dependent** (a
   sample had DOWN/RIGHT swapped) — flip `BOARD_TBOX_*` or the `dx/dy` signs in
-  [tdeck.h](../main/tdeck.h) / [tdeck.cpp](../main/tdeck.cpp) if it feels
+  [tdeck.h](../esp-idf/include/tdeck.h) / [tdeck.cpp](../esp-idf/src/tdeck.cpp) if it feels
   wrong.
 - **The board's sections of the System Settings page**: **Trackball** → Pointer
   speed (`s.tdeck.trackball_speed`,
   4–40) + Cursor dwell (`s.tdeck.pointer_visible_time`, 1–30 s; `-1`/always stays
-  CLI/browser-only); **Display** → Backlight (`s.lcd.backlight`).
-- **Touch tracking** while a finger is down is a 10 ms `lv_timer`, created on
-  press and deleted on release (the GT911 INT only guarantees the first edge).
+  CLI/browser-only); **Display** → Backlight (`s.lcd.backlight`) + Keyboard light
+  (`s.tdeck.kb_backlight`, 0–255, default 127).
+- **The keyboard lamp is gated on a held wake press, then follows the panel
+  backlight.** Holding the centre button for `kStandbyHoldMs` (300 ms) as it wakes
+  the deck lights the keys; a tap wakes the screen alone. The screen never waits
+  for the hold — `sys.standby` clears on the press itself. Once lit,
+  `lcdBacklightOnChange` feeds the board every duty the screen takes and the lamp
+  duty is the configured level scaled by `panel duty / lcdBacklightTarget()`, so
+  it dims in the same proportion and is dark before the panel powers off; going
+  dark also ends the latch, so the next wake has to ask again. The `kbpoll` task
+  does the I2C write (it owns the bus), which is why it still pushes while parked
+  in standby — the fade to dark outlives the park. A duty already written is never
+  rewritten, so the keyboard's own `Alt`+`B` (invisible to the host) stands until
+  the screen next moves; the single exception is the write that takes the lamp out
+  with the screen, which always lands. See
+  [Keyboard protocol and keycodes](#keyboard-protocol-and-keycodes-c3-firmware)
+  for the commands and [INTERNALS §4.5](../INTERNALS.md) for the policy.
+- **Touch tracking** while a finger is down is the `kbpoll` task shortening its
+  own scan from 30 ms to 10 ms (the GT911 INT only guarantees the first edge).
 - **GPIO ISR service** is installed with `ESP_INTR_FLAG_IRAM` so the IRAM-safe
   `lcdInputISR` survives cache-disabled windows — the **same flag LoRa's DIO1
-  path uses** ([../main/esp_idf_hal.cpp](../main/esp_idf_hal.cpp)). Whichever of
+  path uses** ([iface-lora's `esp_idf_hal.cpp`](../../iface-lora/esp-idf/src/esp_idf_hal.cpp)). Whichever of
   `tdeck.cpp` / `esp_idf_hal.cpp` runs first installs it; the other tolerates
   `ESP_ERR_INVALID_STATE`.
 

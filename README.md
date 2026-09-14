@@ -29,24 +29,25 @@ orientation — are in [INTERNALS.md](INTERNALS.md).
 
 ## What it does, and how it fits
 
-The board contributes hooks that the buildable's generated init dispatcher calls
-in two bands — a `start:` band that runs before `spangapInit()` (bare-hardware
-prerequisites) and an `init:` band that runs after the platform is up. There is
-nothing to call by hand: if the straddle is in the build, the board comes up
-automatically.
+The board contributes services that the buildable's generated `app_main`
+constructs in `straddle.yaml` order and walks in two bands — `onStart()` before
+`spangapInit()` (bare-hardware prerequisites) and `onInit()` after the platform
+is up. There is nothing to call by hand: if the straddle is in the build, the
+board comes up automatically.
 
-| Hook | Band | Present when | Brings up |
+| Service | Band | Present when | Brings up |
 |---|---|---|---|
-| `tdeckStart` | start | always | peripheral power rail HIGH, shared-SPI CS park, shared I2C0 bus |
-| `tdeckLcdStart` | start | `spangap-lcd` staged | registers the touch/trackball/button input HAL with the LCD component (before `lcdInit`) |
-| `tdeckLcdInit` | init | `spangap-lcd` staged | QWERTY keyboard (needs the LCD task) |
-| `tdeckAudioInit` | init | `spangap/audio` staged | registers the ES7210 mic codec ops |
-| `tdeckBatteryInit` | init | always | ADC + 1/min battery-voltage timer |
+| `TdeckBoard::onStart` | start | always | peripheral power rail HIGH, shared-SPI CS park, shared I2C0 bus |
+| `TdeckBoard::onInit` | init | always | publishes `sys.board` (needs storage) |
+| `TdeckLcdInput::onStart` | start | `spangap-lcd` staged | registers the touch/trackball/button input HAL with the LCD component (before `lcdInit`) |
+| `TdeckLcdInput::onInit` | init | `spangap-lcd` staged | QWERTY keyboard and its lamp (needs the LCD task) |
+| `TdeckAudio::onInit` | init | `spangap/audio` staged | registers the ES7210 mic codec ops |
+| `TdeckBattery::onInit` | init | always | ADC + 1/min battery-voltage timer |
 
-`tdeckStart` **must** precede `spangapInit()`, because the first shared-SPI-bus
+`TdeckBoard::onStart` **must** precede `spangapInit()`, because the first shared-SPI-bus
 access is the SD-card mount *inside* `spangapInit()` and the SD card is dead
 until the +3.3 V peripheral rail is up and the LCD/LoRa CS lines are parked HIGH.
-That ordering is the reason the board has a `start:` hook at all.
+That ordering is the reason the board does anything in the start band at all.
 
 The board pulls in what its hardware warrants (`additional_installs:`): the
 on-device LCD UI ([spangap-lcd](../spangap-lcd)) because it has a screen, the
@@ -152,6 +153,28 @@ values below are verified against the source.
 | `s.tdeck.trackball_accel_max` | `18` | pulses/s at which `trackball_speed` is reached |
 | `s.tdeck.trackball_smooth_ms` | `150` | time constant of the pulse-rate EMA |
 | `s.tdeck.pointer_visible_time` | `2` | cursor dwell, seconds after activity; `-1` = always on |
+| `s.tdeck.kb_backlight` | `127` | keyboard lamp duty when fully lit, 0..255 (`0` = never lit) |
+
+### Keyboard lamp
+
+The keys are lit by the keyboard's own ESP32-C3, so the host has no backlight pin
+— only a two-byte I2C command. **Hold the centre button to wake and the keys come
+up with the screen**; tap it and only the screen does. The screen never waits for
+the hold either way — it is up the instant the press lands, and only the keys
+watch the 300 ms. A deck picked up for a glance costs no lamp; a deck picked up to
+type on asks for one in the same gesture that wakes it.
+
+Once lit the lamp **follows the screen**: the same proportional cut at the
+inactivity dim, dark before the panel powers off. Going dark also ends it, so each
+trip out of standby asks again. `s.tdeck.kb_backlight` is the duty it reaches when
+the screen is at full; `0` means the hold lights nothing.
+
+`Alt`+`B` on the keyboard toggles the lamp too, to the same level — the C3 handles
+that combo itself and tells the host nothing, so an `Alt`+`B` holds until the
+screen next changes state and then the screen wins again. The one thing it can
+never outlast is the screen going out: that write always lands, so the deck never
+sleeps with lit keys. Moving the slider in Settings lights the keys for three
+seconds, so the level can be judged on the keys rather than on a number.
 
 ### Centre button
 
@@ -162,6 +185,11 @@ device, where the waking press counts as the first click, so a double or triple
 click wakes and navigates in one gesture. (A single click on a sleeping device
 just wakes it.) A further click extends the burst if it lands within 250 ms of
 the last.
+
+The 300 ms hold reads both ways: awake it sleeps the deck, and on a sleeping deck
+it is what brings the keyboard lamp up with the screen (above). The waking press
+is swallowed whole, so holding it never counts as a click and never sleeps the
+deck it just woke.
 
 Neither timing is a setting — they are reflexes, not preferences.
 

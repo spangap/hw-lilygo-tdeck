@@ -12,5 +12,5 @@
 
 class TdeckAudio : public Service {
 public:
-    void onInit() override;   /* was tdeckAudioInit */
+    void onInit() override;   /* hands the ES7210 ops to the audio engine */
 };

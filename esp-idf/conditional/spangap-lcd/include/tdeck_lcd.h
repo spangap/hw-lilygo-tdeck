@@ -14,6 +14,6 @@
 
 class TdeckLcdInput : public Service {
 public:
-    void onStart() override;   /* was tdeckLcdStart — input HAL register */
-    void onInit() override;    /* was tdeckLcdInit  — keyboard bring-up */
+    void onStart() override;   /* input HAL register, before lcdInit() */
+    void onInit() override;    /* keyboard bring-up, once the lcd task exists */
 };
