@@ -136,7 +136,7 @@ kconfig:
   # One SX1262 LoRa modem on the same FSPI bus (host/SCK/MOSI/MISO match SD).
   # TCXO is 1.8 V; the SX1262 drives DIO2 as its own antenna switch. Gated on
   # iface-lora: the CONFIG_LORA_* symbols are DEFINED by that straddle's Kconfig,
-  # so applying these in a build without it (e.g. spangap/demo) would warn as
+  # so applying these in a build without it (e.g. spangap/spangap-demo) would warn as
   # unknown symbols. Wire them only when the LoRa straddle is actually staged.
   - when: reticulous/iface-lora
     set:

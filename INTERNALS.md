@@ -27,7 +27,7 @@ esp-idf/
 
 The GNSS receiver is the generic [gps](../gps) straddle (staged
 from `additional_installs:`, pins supplied as `CONFIG_GPS_*` in `kconfig:`);
-the PCF8563 RTC is [spangap-rtc](../spangap-rtc), which no board stages today.
+the PCF8563 RTC is [rtc](../rtc), which no board stages today.
 
 The `conditional/<straddle>/` directories are compiled **only** when that
 straddle is staged (the build globs them into `SPANGAP_CONDITIONAL_SRCS`), so
