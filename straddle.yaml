@@ -5,8 +5,10 @@
 # buildable adds it with `--with spangap/hw-lilygo-tdeck` and inherits the board's
 # pin maps, bring-up hooks and hardware kconfig.
 #
-# Owns the T-Deck Plus board HAL (esp-idf/src/tdeck.cpp: power/CS/reset, display/
-# touch/trackball/button input HAL, QWERTY keyboard). The GNSS receiver is the
+# Owns the T-Deck Plus board HAL (esp-idf/src/tdeck.cpp: power rail, CS park,
+# shared I2C0, battery; conditional/spangap-lcd/src/tdeck_lcd.cpp: touch/
+# trackball/button input HAL and the QWERTY keyboard, including its push-to-talk
+# and held-Space keys; conditional/audio/: the ES7210 codec). The GNSS receiver is the
 # generic spangap/gps straddle — this board only stages it and supplies
 # its pins. app_main, partitions, the OTA story and the browser SPA are NOT
 # here — they belong to the buildable.
@@ -23,10 +25,13 @@ platforms: [idf]
 additional_installs:
   - spangap/spangap-lcd
   # The T-Deck has audio hardware (ES7210 mic + MAX98357A speaker), so the board
-  # provides the audio engine — the same way its screen brings in spangap-lcd.
-  # Any buildable on this board gains audio; consumers gate their use on
-  # CONFIG_STRADDLE_AUDIO (e.g. lxmf's notification ping). Boards without audio
-  # hardware never stage it, so the engine only runs where the hardware exists.
+  # stages spangap/audio — the same way its screen brings in spangap-lcd — and
+  # turns on AUDIO_IN_ENABLE / AUDIO_OUT_ENABLE in kconfig: below, which is what
+  # builds its I2S engine. Any buildable on this board gains audio. The straddle
+  # alone does not mean hardware (other buildables stage it on boards without
+  # any, for its codecs, and get no engine), so consumers gate sound on
+  # CONFIG_AUDIO_OUT_ENABLE (e.g. lxmf's notification ping) and capture on
+  # CONFIG_AUDIO_IN_ENABLE, not on CONFIG_STRADDLE_AUDIO.
   - spangap/audio
   # The Plus has a GNSS receiver pre-soldered to the Grove header, so the board
   # stages the generic GNSS straddle; its pins are supplied in kconfig: below.
@@ -49,7 +54,7 @@ additional_installs:
 #     task exists.
 #   TdeckAudio (conditional/audio/, when spangap/audio): onInit registers the
 #     ES7210 codec ops; the audio task applies them lazily on first capture. Only
-#     compiled/linked when the audio engine is staged.
+#     compiled/linked when spangap/audio is staged.
 #   TdeckBattery.onInit — 1/min esp_timer publishing battery.millivolt /
 #     battery.percent. Always on — no UI dependency.
 # The when:-gated entries vanish entirely when their straddle isn't staged. TdeckBoard
@@ -110,20 +115,18 @@ kconfig:
   #   * FLASHSIZE — the flash CONTAINER / bootloader-header size. Pinned to the
   #     board's real 16 MB so the header matches the chip (no esptool size-mismatch
   #     warning) and the build can report a concrete /state size. /state starts at
-  #     the floor below, NOT the container, so this no longer has to be < the chip
-  #     as it briefly did under the earlier state-at-container design.
+  #     the boundary below, not at the container size.
   #   * MAX_FIRMWARE_KB — the byte-granular MAXIMUM FIRMWARE SIZE = the offset where
-  #     /state begins. 6 MB = app+fixed (~3.7 MB) plus ~2.2 MB of growth headroom.
-  #     /state fills the rest of the real chip → ~10 MB here.
+  #     /state begins: 8 MB of app plus fixed partitions and growth headroom.
+  #     /state fills the rest of the real chip → ~8 MB here.
   # Changing MAX_FIRMWARE_KB relocates /state → existing devices factory-reset on
   # the next boot, so warn users before bumping it.
   - CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
   - CONFIG_SPANGAP_MAX_FIRMWARE_KB=8192
   - CONFIG_SPIRAM_MODE_OCT=y
-  # PSRAM runs at spangap-core's 80 MHz default. (Briefly tried 40 MHz chasing
-  # `cat`-during-flash crashes, but those were PSRAM-*placement* bugs — FreeRTOS
-  # control structures wrongly in PSRAM — not MSPI timing; see docs/memory.md.
-  # 40 MHz changed nothing and only halved read bandwidth, so reverted.)
+  # PSRAM runs at spangap-core's 80 MHz default. Crashes during flash writes are
+  # PSRAM-placement bugs (FreeRTOS control structures in PSRAM), not MSPI timing;
+  # 40 MHz does not cure them and halves read bandwidth.
   # SD card on the shared FSPI bus (pins shared with LoRa + LCD; spangap's
   # spi_helper arbitrates the bus).
   - CONFIG_SPANGAP_SDCARD=y

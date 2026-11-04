@@ -52,7 +52,8 @@
 #define BOARD_TOUCH_RST_PIN     (-1)
 
 /* Home / centre button: GPIO 0 (the BOOT-strap pin, also the trackball
- * centre-press; shared with the mic, which reticulous never uses). Read as a
+ * centre-press; also wired to the mic, whose clock the audio engine takes from
+ * GPIO 48, so audio never drives GPIO 0). Read as a
  * pulled-up active-low input after boot — tdeck_lcd.cpp gives it five meanings: a
  * standby_hold-ms hold enters standby, one click is a click, two clicks go Home
  * (lcdGoHome), three raise the app switcher (lcdShowRecents), and a press while in
@@ -72,12 +73,14 @@
 #define BOARD_TBOX_RIGHT_PIN    2
 
 /* QWERTY keyboard: an ESP32-C3 keyboard MCU on the shared I2C0 bus, I2C slave
- * 0x55. A 1-byte read returns the next pressed ASCII char (0 = none) and pops
- * it; only the last unread key is held. The C3 firmware reports press events
- * only — no key-up / hold / repeat — and never drives its INT (GPIO 46), so the
- * read is polled. Writes are commands: {0x01,duty} sets the keyboard backlight
- * (C3 GPIO 9, 0-255, 0 at power-on), {0x03}/{0x04} switch between raw-matrix
- * and ASCII key mode. See docs/tdeck.md for the full protocol and keycodes. */
+ * 0x55. In key mode (the power-on default) a 1-byte read returns the next
+ * pressed ASCII char (0 = none) and pops it; only the last unread key is held,
+ * and there is no key-up / hold / repeat. In raw-matrix mode (C3 firmware from
+ * 2025-06-12) a 5-byte read returns the live switch state. The C3 never drives
+ * its INT (GPIO 46), so either read is polled. Writes are commands: {0x01,duty}
+ * sets the keyboard backlight (C3 GPIO 9, 0-255, 0 at power-on), {0x03}/{0x04}
+ * switch between raw-matrix and key mode. See docs/tdeck.md for the full
+ * protocol and keycodes. */
 #define BOARD_KB_ADDR           0x55
 #define BOARD_KB_INT_PIN        46
 /* Keyboard write commands. BRIGHTNESS sets the lamp duty now; ALT_B_LEVEL sets
@@ -85,6 +88,10 @@
  * below. Neither is readable back. */
 #define BOARD_KB_CMD_BRIGHTNESS   0x01
 #define BOARD_KB_CMD_ALT_B_LEVEL  0x02
+/* Mode commands: RAW makes a 5-byte read return one bitmap per column (bit r =
+ * row r held), KEY returns to the 1-byte key mode the C3 powers up in. */
+#define BOARD_KB_CMD_MODE_RAW     0x03
+#define BOARD_KB_CMD_MODE_KEY     0x04
 
 /**
  * Board bring-up. TdeckBoard::onStart() is the always-on hardware bring-up: it

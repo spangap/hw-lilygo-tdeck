@@ -78,8 +78,8 @@ already true:
    `loraInit()` (which would own its CS) runs long after the SD probe.
 
 `TdeckBoard::onStart` also creates the shared **I2C0** bus eagerly, while still
-single-threaded, so the touch (LCD task), keyboard (poll task) and codec (audio
-task) can't race `i2c_new_master_bus()` on the same port. `tdeckI2cBus()` is
+single-threaded, so the touch and keyboard (both on the poll task) and the codec
+(audio task) can't race `i2c_new_master_bus()` on the same port. `tdeckI2cBus()` is
 otherwise lazy / first-caller-wins.
 
 `TdeckLcdInput::onStart` registers the input HAL with the LCD component
@@ -198,7 +198,7 @@ dwell is pushed in via `lcdPointerSetVisibleMs` from `s.tdeck.pointer_visible_ti
 
 ### 4.3 Centre / Home button & standby
 
-GPIO 0 (BOOT-strap, also the trackball centre-press, also the unused mic) is read
+GPIO 0 (BOOT-strap, also the trackball centre-press) is read
 pulled-up active-low. The board owns the timing and the five meanings of a press,
 driven by two one-shot `lv_timer`s on the LCD task:
 
@@ -246,40 +246,96 @@ task parked. Only the centre button stays live to wake.
 ### 4.4 QWERTY keyboard
 
 The keyboard is an ESP32-C3 MCU on I2C0 @ 0x55. It is a poor fit for the generic
-indev model, so it lives in the consumer, not spangap-core:
+indev model, so it lives here, not in spangap-lcd:
 
 - **GPIO 46 ("key buffered" INT) is dead** — the stock/rgrizzell C3 firmware
   never drives it (verified on hardware and in the C3 source).
-- The 1-byte read is **destructive** (pops the key, returns 0 when empty, no
-  peek/count), so you can't tell a key is pending without consuming it.
+- **Two read modes.** In key mode (the C3's power-on default) a 1-byte read pops
+  the last unread key (0 when empty, no peek, no buffer, no key-up). In
+  raw-matrix mode (`[0x03]`, C3 firmware from 2025-06-12) a 5-byte read returns
+  the live switch state, one bitmap per column, bit r = row r closed, bit 7
+  always clear. Raw mode is what makes key-up — and so push-to-talk — visible.
 
-So a dedicated `kbpoll` task (**prio 6, core 1**) polls the I2C off the
-LCD task at a fixed `POLL_PERIOD` (30 ms). The C3 holds only the last unread
-key (no buffer), so a lazy/adaptive backoff drops keystrokes under fast typing;
-standby parks the task, so the always-on scan costs nothing while asleep.
-It buffers bytes into a queue and bumps the LCD task via `lcdRun(kbDrain)` to
-drain them through an LVGL keypad indev joined to `lcdInputGroup()`. That bump is
-best-effort (a flash flush can stall the LCD task past `lcdRun`'s send bound), and
-the bytes are queued either way, so a failed post leaves the drain *owed* and the
-next pass — one `POLL_PERIOD` later — re-posts it, rather than stranding those keys
-until someone presses another. Prio 6 is
-one notch above the LCD task (prio 5) so a long synchronous redraw can't starve
-the poll. The same task samples the GT911 — touch and keyboard are the only two
-peripherals on I2C0, so one owner means no bus contention, and outranking the
-render is what keeps touch sampling on cadence while the LCD task is busy.
-`lcdSetHasKeyboard(true)` tells the component to suppress the on-screen keyboard.
+So a dedicated `kbpoll` task (**prio 6, core 1**) polls the I2C off the LCD task
+at a fixed `POLL_PERIOD` (30 ms) — about the C3's own ~35 ms matrix scan, and in
+key mode fast enough that the single unread key is rarely overwritten; standby
+parks the task, so the always-on scan costs nothing while asleep. Each pass
+pushes any pending lamp write, samples the GT911, then runs `kbPoll()`, which
+dispatches on the mode. Typed keys become LVGL key codes in a 32-entry queue,
+and the task bumps the LCD task via `lcdRun(kbDrain)` to drain them through an
+LVGL keypad indev joined to `lcdInputGroup()`. That bump is best-effort (a flash
+flush can stall the LCD task past `lcdRun`'s send bound), and the codes are
+queued either way, so a failed post leaves the drain *owed* and the next pass —
+one `POLL_PERIOD` later — re-posts it, rather than stranding those keys until
+someone presses another. Prio 6 is one notch above the LCD task (prio 5) so a
+long synchronous redraw can't starve the poll. The task is the only polled user
+of I2C0 (keyboard, touch, lamp); the ES7210 codec is written only by the audio
+task when capture starts or stops, and the IDF master driver serialises the
+two. Outranking the render is what keeps touch sampling on cadence while the
+LCD task is busy. `lcdSetHasKeyboard(true)` tells the component to suppress the
+on-screen keyboard.
+
+**Mode probe** (`probeStep`, inside the poll cadence). Write `[0x03]`, retried
+each poll until the C3 acknowledges; then read 5 bytes per poll.
+`PROBE_RUN` (3) identical frames in a row with bit 7 clear everywhere is a raw
+C3 — identical rather than all-zero, so a key held through boot does not fail it,
+and a run tolerates the first read still carrying a key-mode answer. It logs
+`keyboard: raw-matrix mode (3 identical frames, bit 7 clear, after N reads)`,
+declares `LCD_KEY_PTT` and `LCD_KEY_SPACE`, and sets `tdeck.keyboard = raw`.
+`PROBE_FRAMES` (20) answered reads without a run, or `PROBE_POLLS` (100) polls
+without that many answers, is key mode (`enterKeyMode`): write `[0x04]`,
+declare only `LCD_KEY_PTT` (undeclaring `LCD_KEY_SPACE`, which a raw mode
+given up on had declared), log the reason and `push-to-talk is Shift+Mic,
+latching`, set `tdeck.keyboard = key`. In raw mode an invalid frame (bit 7 set:
+the C3 reset to key mode) is counted; every `RAW_LOST` (3) in a row re-sends
+`[0x03]`, and `RAW_GIVEUP` (30) releases everything held and falls to key mode.
+An I2C error is neither a frame nor a bad one.
+
+**Raw frames** (`rawFrame`). After entering raw mode and after every standby
+(`s_kbResync`), what is held in the first frame goes to `s_kbIgnore` and stays
+masked until released. Ghost rejection works on the unmasked frame: any two
+columns sharing two or more closed rows make those positions ambiguous (the
+matrix has no diodes, so three corners of a rectangle close the fourth), and a
+position there that is not already down is dropped from the frame. Debounce is
+asymmetric — a press counts on the first frame showing it, a release only after
+two open frames in a row (`s_kbUpPend`). Edges then go out modifiers first (so a
+key pressed with its Shift in one frame is shifted), releases before presses.
+`rawEdge` handles Alt (a tap with nothing else pressed arms the Ctrl lead-in),
+ignores Sym/Shift, routes Mic and Space through the held-key API, and hands the
+rest to `rawPress`, which maps through `rawCode` (tables `kBase`, `kSym`,
+`kShiftSym`; Alt+letter = `LCD_KEY_CTRL | letter`; Alt+B, the C3's lamp toggle,
+types nothing) and arms repeat: `REPEAT_DELAY_US` 500 ms, then every `REPEAT_US`
+60 ms, checked once per frame, for printable keys, Backspace and Delete only.
+The full key map is in [docs/tdeck.md §1.8](docs/tdeck.md).
+
+**Held keys** (spangap-lcd `lcd_keys.h`). Mic is `LCD_KEY_PTT`, Space is
+`LCD_KEY_SPACE`. `namedKeyEdge` reports each debounced edge with
+`lcdKeyReport`; a down that comes back claimed sets `s_swallowed[k]`, stops any
+repeat and types nothing (Sym+Mic included), and the matching up is swallowed
+too. Unclaimed, Space types and repeats as an ordinary key and Mic types nothing
+unless Sym is held. `kbPark` (entering standby) runs `rawReleaseAll`, so every
+held key — push-to-talk included — reports its up before the task sleeps.
+
+**Key mode** (`kmPoll` / `kmByte`). Up to 16 bytes per poll until a read returns
+0 (bounded so a wedged C3 can't spin the task); Enter, Backspace, Esc and
+printable ASCII map straight across, `0x0C` (Alt-C) arms the same one-shot Ctrl
+lead-in (1 s; armed again = Esc). With no key-up, push-to-talk latches:
+`Shift`+`Mic` sends 0xE0 (the C3's −32 applied to the key's empty 0x00, also
+produced by `Shift`+`Sym`+`Space` and `Shift`+`Sym`+`$`), and each 0xE0 toggles
+`s_kmPttLatched` — down if the report comes back claimed, otherwise an
+immediate up. A latched push-to-talk is released (its up reported) by `kbPark`,
+and by `kmPoll` as soon as `lcdKeyClaimed(LCD_KEY_PTT)` goes false, so the next
+press after a consumer lets go keys again rather than only unlatching.
 
 GPIO 46 is still wired `ANYEDGE`: an edge wakes the poll early and is counted
-for the `kbint` diagnostic (useful if a future C3 firmware ever drives it).
+for the `kbint` diagnostic; nothing else depends on it.
 The indev is created lazily
 in `kbDrain` (not in `TdeckLcdInput::onInit`): that `onInit` fires `lcdRun(kbCreateIndev)`
 right after `spangapInit()`, which can land before the LCD task has registered
 its `LCD_RUN_PORT` aux handler, so the create can silently fail; `kbDrain` runs
 only once the LCD task is fully up, making it the race-proof place to build it.
-The `readCb` synthesizes press+release over two reads and decodes a `0x0C` prefix
-(Alt-C) as a one-shot "next lowercase is `LCD_KEY_CTRL | letter`" lead-in (1 s
-window) for the terminal. A keystroke that woke the screen is swallowed (it only
-served to wake).
+The `readCb` synthesizes press+release over two reads. A keystroke that woke the
+screen is swallowed (it only served to wake).
 
 ### 4.5 Keyboard lamp
 
@@ -318,9 +374,9 @@ The exception is `s_kbBlForce`, set whenever the computed duty and the panel dut
 are both 0: **the write that takes the lamp out with the screen always lands**. A
 deck must not sleep with lit keys, and an Alt+B we never saw is exactly how it
 otherwise could — our cache would say 0, the keys would say otherwise, and nothing
-would correct it. There is no way to read the lamp back in key mode; raw-matrix
-mode would make the combo visible (`docs/tdeck.md`), which is the fix if this ever
-needs to be exact rather than merely safe.
+would correct it. The lamp cannot be read back. In raw-matrix mode the host sees
+Alt+B as well, but only to type nothing for it; the lamp state is not tracked
+from it, so the policy is the same in both modes.
 
 Moving the slider lights the keys at the level under the thumb for 3 s
 (`KB_BL_PREVIEW_MS`) — a level is a thing you judge by looking at the keys, not at
@@ -386,8 +442,14 @@ four hardware mics only one is populated on the board (the rest are unconnected)
   sample had DOWN/RIGHT swapped). Flip `BOARD_TBOX_*` or the `dx/dy` signs if
   motion feels wrong — it is not a code bug.
 - **The keyboard INT is dead on current firmware** — don't build an INT-only read
-  path. The poll path is load-bearing; the self-healing edge detection is the
-  only thing that would ever switch it off.
+  path. The poll is load-bearing in both modes; a GPIO 46 edge only wakes it
+  early.
+- **The C3's mode is probed, not assumed.** Raw mode needs C3 firmware from
+  2025-06-12 and is lost when the C3 resets; the probe and the bad-frame
+  recovery (§4.4) are what keep an older or freshly reset C3 typing. Check
+  `tdeck.keyboard` (or the boot log) before debugging a key that does nothing:
+  in key mode Space has no held-key edges and push-to-talk is `Shift`+`Mic`,
+  latching.
 - **Battery divider is 2.0, not 2.11.** The ADC is curve-fit calibrated, so the
   true divider ratio applies; 2.11 is Meshtastic's compensation for an
   *uncalibrated* ADC and would over-read here.

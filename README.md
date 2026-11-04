@@ -126,9 +126,10 @@ block and consumed by the owning straddle.
 | **Audio out — MAX98357A** (spangap/audio) | I2S1: BCK 7, WS 5, DOUT 6 |
 | **Audio in — ES7210** (spangap/audio) | I2S0: MCLK 48, SCK 47, WS 21, DIN 14; default rate 16 kHz |
 
-Flash size is intentionally **not** pinned: the platform ships a 4 MB floor
-image and self-grows to the real 16 MB at first boot, so one image is universal
-across flash sizes. PSRAM runs at the platform's 80 MHz default.
+Flash is pinned to the board's real 16 MB (`CONFIG_ESPTOOLPY_FLASHSIZE_16MB`)
+and the firmware region to 8 MB (`CONFIG_SPANGAP_MAX_FIRMWARE_KB=8192`); `/state`
+fills the rest. Moving that boundary relocates `/state`, so existing devices
+factory-reset on the next boot. PSRAM runs at the platform's 80 MHz default.
 
 LoRa is sold per band (433 / 868 / 915 / 920 MHz — the radio is identical, only
 the matching network and antenna differ). The antenna is a PCB trace on the
@@ -154,6 +155,26 @@ values below are verified against the source.
 | `s.tdeck.trackball_smooth_ms` | `150` | time constant of the pulse-rate EMA |
 | `s.tdeck.pointer_visible_time` | `2` | cursor dwell, seconds after activity; `-1` = always on |
 | `s.tdeck.kb_backlight` | `127` | keyboard lamp duty when fully lit, 0..255 (`0` = never lit) |
+
+### Keyboard
+
+The keyboard's ESP32-C3 is read in raw-matrix mode wherever its firmware has it
+(LilyGo's stock firmware from 2025-06-12 on): the board reads all 35 switches
+every 30 ms and does debounce, ghost rejection, the key map and repeat itself.
+The caps type what they show; `Shift`+`Sym` adds the characters the caps lack
+(`%` `^` `&` `[` `]` `{` `}` `=` `\` `|` `<` `>` `` ` `` `~`), `Sym`+`Space` is
+Tab, `Sym`+`Backspace` is Delete, and `Alt` makes Ctrl — held with a letter, or
+tapped alone for the next letter (tapped twice, Esc). Keys repeat after 500 ms,
+every 60 ms. **Mic is push-to-talk** and **Space doubles as a held key**: both
+are reported down and up to [spangap-lcd](../spangap-lcd)'s held-key API, and a
+press that a consumer has claimed is swallowed instead of typed. Alone and
+unclaimed, Mic types nothing. The full key map and the probe are in
+[docs/tdeck.md §1.8](docs/tdeck.md).
+
+An older C3 without raw mode is driven in its key mode instead, which reports
+presses only: typing works as the C3 maps it, and push-to-talk is
+**`Shift`+`Mic`, latching** — one press keys it, the next releases it. Which
+mode the keyboard is in is published as `tdeck.keyboard` and logged at boot.
 
 ### Keyboard lamp
 
@@ -201,6 +222,7 @@ Neither timing is a setting — they are reflexes, not preferences.
 | `battery.millivolt` | true VBAT in mV (pin reading × 2, EMA-smoothed) |
 | `battery.percent` | 0–100 via the measured discharge curve |
 | `tdeck.touch` | GT911 probe result string (`GT911 @ 0x5D` / `not found`) |
+| `tdeck.keyboard` | keyboard read mode found by the boot probe: `raw` (raw-matrix) or `key` (the C3's key mode) |
 | `lcd.multi_touch` | runtime *input* flag (no `s.`, owned by spangap-lcd): a consumer (e.g. maps) sets it to enable multi-point touch; not persisted |
 
 The GNSS keys (`s.gps.*`, `gps.*`) are [gps](../gps)'s — see its

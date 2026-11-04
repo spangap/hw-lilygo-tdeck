@@ -16,6 +16,7 @@
 #include "freertos/task.h"
 
 #include "lcd_input.h"
+#include "lcd_keys.h"
 #include "lcd.h"
 #include "storage.h"
 #include "log.h"
@@ -32,6 +33,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include "esp_lcd_panel_io.h"
 #include "esp_lcd_touch.h"
 #include "esp_lcd_touch_gt911.h"
@@ -281,8 +283,9 @@ static bool tdeckTouchSample(void) {
 }
 
 /* ---- centre / Home button (GPIO 0): click, navigation, standby ----
- * GPIO 0 is the BOOT-strap pin, also the trackball centre-press (shared with the
- * mic, which reticulous never uses). Pulled-up active-low. The board owns the
+ * GPIO 0 is the BOOT-strap pin, also the trackball centre-press (also wired to
+ * the mic, whose clock the audio engine takes from GPIO 48, so audio never
+ * drives GPIO 0). Pulled-up active-low. The board owns the
  * timing and the five meanings of the press:
  *   - hold 300 ms                -> standby (set sys.standby)
  *   - one click                  -> a pointer click (lcd turns it into one)
@@ -783,11 +786,16 @@ void TdeckLcdInput::onStart() {
  *   - GPIO46 is wired as a "key buffered" interrupt but the stock/rgrizzell C3
  *     firmware never drives it (verified on hardware and in the C3 source), so an
  *     INT-only path reads nothing.
- *   - The 1-byte read is destructive (pops the key) with no peek and returns 0
- *     when empty, so we can't tell a key is pending without consuming it.
+ *   - A C3 with raw-matrix mode is driven in it: each poll reads the live switch
+ *     state, and debounce, ghost rejection, the key map, modifiers and repeat
+ *     are ours. An older C3 stays in key mode, whose 1-byte read is destructive
+ *     (pops the key) with no peek and returns 0 when empty. A probe at bring-up
+ *     tells the two apart.
  *
- * So a dedicated task polls the I2C off the lcd task, buffers keys into a queue,
- * and bumps the lcd task (lcdRun) to drain them through our LVGL keypad indev.
+ * So a dedicated task polls the I2C off the lcd task, turns what it reads into
+ * key codes in a queue, and bumps the lcd task (lcdRun) to drain them through
+ * our LVGL keypad indev. The Mic key and Space are also reported as held keys
+ * (lcd_keys.h); a claimed press is swallowed rather than typed.
  * We keep GPIO46 wired anyway: an edge wakes the poll early and is reported by
  * the kbint diagnostic (useful if a future firmware drives it).
  *
@@ -798,11 +806,12 @@ void TdeckLcdInput::onStart() {
  * scan cadence for smooth tracking; see below.
  *
  * Dependency is one-way: we call into lcd (lcdRun / lcdTouchPoll / lcdInputGroup /
- * lcdSetHasKeyboard); the lcd component has no knowledge of the keyboard. */
+ * lcdSetHasKeyboard / lcdKeyReport); the lcd component knows only the named
+ * held keys we report, never the matrix or the key map. */
 namespace {
 
 i2c_master_dev_handle_t s_kbd        = nullptr;
-QueueHandle_t           s_queue      = nullptr;   /* bytes: poll task -> lcd task */
+QueueHandle_t           s_queue      = nullptr;   /* uint32_t key codes: poll task -> lcd task */
 TaskHandle_t            s_pollTask   = nullptr;
 lv_indev_t*             s_indev      = nullptr;    /* our keypad indev (lcd task) */
 bool                    s_again      = false;      /* lcd task: more to drain this cycle */
@@ -810,8 +819,9 @@ bool                    s_drainOwed  = false;      /* poll task: queued bytes th
                                                       has not been bumped for yet */
 volatile uint32_t       s_intCount   = 0;          /* for the kbint diagnostic */
 
-/* Poll periods. The C3 holds only the last unread key (no buffer), so any lazy
- * backoff drops keystrokes under fast typing; standby parks the task, so the
+/* Poll periods. In key mode the C3 holds only the last unread key (no buffer),
+ * so any lazy backoff drops keystrokes under fast typing, and in raw mode the
+ * C3's own scan takes ~35 ms, so polling faster gains nothing; standby parks the task, so the
  * always-on 30 ms scan costs nothing while the device sleeps. While a finger is
  * down we scan faster so touch tracking (a drag / scroll) stays smooth — the
  * component re-reads the latch every 10 ms, so refresh it at a matching rate. */
@@ -841,8 +851,9 @@ constexpr TickType_t TOUCH_PERIOD = pdMS_TO_TICKS(10);
  * the same configured level, which is what ALT_B_LEVEL keeps in sync. The one
  * write never skipped as a repeat is the one that takes the lamp out with the
  * screen: a deck must not sleep with lit keys, and an unseen Alt+B is exactly the
- * way it otherwise could. Reading the lamp back is not possible at all in key
- * mode; raw-matrix mode would make the combo visible (docs/tdeck.md). */
+ * way it otherwise could. The lamp cannot be read back. The C3 toggles it on
+ * Alt+B in raw-matrix mode too; there we see the combo as well and type
+ * nothing for it. */
 constexpr uint32_t KB_BL_PREVIEW_MS = 3000;   /* slider moved: hold it lit this long */
 
 int            s_kbBlLevel   = 0;        /* s.tdeck.kb_backlight: duty when fully lit */
@@ -923,60 +934,424 @@ void kbBacklightFollow(uint8_t duty) {
     kbBacklightApply();
 }
 
-uint32_t mapAsciiKey(uint32_t b) {
+/* Poll task: hand a key code to the lcd task (kbDrain picks it up). */
+void kbType(uint32_t code) {
+    if (!code || !s_queue) return;
+    xQueueSend(s_queue, &code, 0);
+    s_drainOwed = true;
+}
+
+/* ---- the one-shot Ctrl lead-in, shared by both modes (poll task) ----
+ * Armed by Alt-C in key mode and by Alt tapped on its own in raw mode: the next
+ * lowercase letter within 1 s becomes Ctrl-<letter> (LCD_KEY_CTRL, which the
+ * terminal turns into a control byte); arming it again while armed is Esc. */
+constexpr int64_t CTRL_ARM_US = 1000 * 1000;
+int64_t s_ctrlUntil = 0;
+
+bool ctrlArmed(int64_t now) { return s_ctrlUntil && now < s_ctrlUntil; }
+
+void ctrlLeadIn(int64_t now) {
+    if (ctrlArmed(now)) { s_ctrlUntil = 0; kbType(LV_KEY_ESC); }
+    else                s_ctrlUntil = now + CTRL_ARM_US;
+}
+
+/* ---- held keys (lcd_keys.h) ---- */
+
+const char* namedKeyName(uint8_t k) { return k == LCD_KEY_PTT ? "ptt" : "space"; }
+
+/* Report one edge of a named key; true = claimed, so swallow the press. */
+bool namedKeyEdge(uint8_t k, bool down) {
+    bool claimed = lcdKeyReport(k, down);
+    dbg("key %s %s%s\n", namedKeyName(k), down ? "down" : "up", claimed ? " (claimed)" : "");
+    return claimed;
+}
+
+/* ---- key mode (C3 firmware without raw mode) ----------------------------- */
+
+/* Key mode's Mic: alone it sends nothing, but Shift+Mic sends 0xE0 (the C3
+ * subtracts 32 from the key's empty 0x00), a byte no character uses — so that
+ * press toggles push-to-talk: down on one press, up on the next. An unclaimed
+ * toggle reports its own up at once and stays off, and a latched one comes up
+ * by itself when the last claim goes (kmPoll), so the next press keys again. */
+bool s_kmPttLatched = false;
+
+void kmByte(uint8_t b) {
+    const int64_t now = esp_timer_get_time();
+    if (b == 0xE0) {
+        if (s_kmPttLatched) { s_kmPttLatched = false; namedKeyEdge(LCD_KEY_PTT, false); }
+        else if (namedKeyEdge(LCD_KEY_PTT, true)) s_kmPttLatched = true;
+        else namedKeyEdge(LCD_KEY_PTT, false);
+        return;
+    }
+    if (b == 0x0C) { ctrlLeadIn(now); return; }       /* Alt-C */
+    const bool armed = ctrlArmed(now);
+    s_ctrlUntil = 0;
+    if (armed && b >= 'a' && b <= 'z') { kbType(LCD_KEY_CTRL | b); return; }
     switch (b) {
-        case 13: case 10:  return LV_KEY_ENTER;
-        case 8:  case 127: return LV_KEY_BACKSPACE;
-        case 27:           return LV_KEY_ESC;
-        default:           return (b >= 0x20 && b < 0x7F) ? b : 0;
+        case 13: case 10:  kbType(LV_KEY_ENTER);     return;
+        case 8:  case 127: kbType(LV_KEY_BACKSPACE); return;
+        case 27:           kbType(LV_KEY_ESC);       return;
+        default:           if (b >= 0x20 && b < 0x7F) kbType(b); return;
     }
 }
 
-/* Raw destructive read of the next buffered key (0 = none). Runs on the poll
- * task (off the lcd task). */
-uint32_t i2cReadKey() {
-    if (!s_kbd) return 0;
-    /* kbint diagnostic: report a GPIO46 edge if one ever shows up. */
-    static uint32_t lastInt = 0;
-    uint32_t now = s_intCount;
-    if (now != lastInt) { dbg("kbint: GPIO%d fired (total %u)\n", BOARD_KB_INT_PIN, (unsigned)now); lastInt = now; }
-    uint8_t b = 0;
-    if (i2c_master_receive(s_kbd, &b, 1, 10) != ESP_OK) return 0;
-    if (b) dbg("kbread: 0x%02x\n", (unsigned)b);
-    return b;
+/* Key mode, each poll: drain up to a queueful — bounded so a wedged keyboard
+ * that keeps returning a byte can't spin this task. */
+void kmPoll() {
+    if (s_kmPttLatched && !lcdKeyClaimed(LCD_KEY_PTT)) {
+        s_kmPttLatched = false;
+        namedKeyEdge(LCD_KEY_PTT, false);
+    }
+    for (int i = 0; i < 16; i++) {
+        uint8_t b = 0;
+        if (i2c_master_receive(s_kbd, &b, 1, 10) != ESP_OK || !b) break;
+        dbg("kbread: 0x%02x\n", (unsigned)b);
+        kmByte(b);
+    }
 }
 
-/* LVGL keypad read_cb (lcd task): one queued byte per call, press+release
+/* ---- raw-matrix mode --------------------------------------------------------
+ *
+ * 5 columns x 7 rows; frame[c] bit r = switch (c,r) closed. Debounce: a press
+ * counts on the first frame that shows it, a release only on the second frame
+ * in a row that does (a single open sample mid-bounce is not a release). The
+ * matrix has no diodes, so when three closed switches form three corners of a
+ * rectangle the fourth reads closed too; any frame with two columns sharing two
+ * or more rows is ambiguous, and its newly closed corners are dropped (keys
+ * already held stay held).
+ *
+ * Key map. The caps' own legends, plus a Shift+Sym layer for what they lack:
+ *   base        a-z, Space, Enter, Backspace, $
+ *   Shift       A-Z  (other keys as base)
+ *   Sym         the printed symbols: # 1 * 0 2 4 5 @ 8 7 3 / ( ? 9 6 _ : ) ! , ;
+ *               + " - . ' ; Sym+Space = Tab (LV_KEY_NEXT), Sym+Backspace = Delete
+ *   Shift+Sym   digits give the US shifted symbol (1! 2@ 3# 4$ 5% 6^ 7& 8* 9( 0)),
+ *               t [  y ]  u {  i }  o =  g \  b |  n <  m >  k `  l ~ ;
+ *               any other key gives its Sym symbol
+ *   Alt         Alt+letter = Ctrl-letter; Alt tapped alone arms Ctrl for the
+ *               next letter (twice = Esc). Alt+B is the lamp, toggled by the C3
+ *               itself, and types nothing.
+ * Mic types only with Sym ('0', Shift+Sym ')'): alone it is push-to-talk and
+ * does nothing unless claimed. Printable keys, Backspace and Delete repeat
+ * after REPEAT_DELAY_US, every REPEAT_US; Enter, Tab, Esc and Ctrl do not. */
+constexpr int  KB_COLS = 5, KB_ROWS = 7;
+constexpr int64_t REPEAT_DELAY_US = 500 * 1000;
+constexpr int64_t REPEAT_US       = 60 * 1000;   /* two polls */
+
+enum : uint8_t {   /* (col << 3) | row */
+    KP_SYM = (0 << 3) | 2, KP_ALT = (0 << 3) | 4, KP_SPACE = (0 << 3) | 5, KP_MIC = (0 << 3) | 6,
+    KP_LSHIFT = (1 << 3) | 6, KP_RSHIFT = (2 << 3) | 3, KP_ENTER = (3 << 3) | 3,
+    KP_BACKSPACE = (4 << 3) | 3, KP_B = (3 << 3) | 4,
+};
+
+const char kBase[KB_COLS][KB_ROWS] = {
+    { 'q', 'w', 0,   'a', 0,   ' ', 0   },
+    { 'e', 's', 'd', 'p', 'x', 'z', 0   },
+    { 'r', 'g', 't', 0,   'v', 'c', 'f' },
+    { 'u', 'h', 'y', 0,   'b', 'n', 'j' },
+    { 'o', 'l', 'i', 0,   '$', 'm', 'k' },
+};
+const char kSym[KB_COLS][KB_ROWS] = {
+    { '#', '1', 0,   '*', 0,   0,   '0'  },
+    { '2', '4', '5', '@', '8', '7', 0    },
+    { '3', '/', '(', 0,   '?', '9', '6'  },
+    { '_', ':', ')', 0,   '!', ',', ';'  },
+    { '+', '"', '-', 0,   0,   '.', '\'' },
+};
+const char kShiftSym[KB_COLS][KB_ROWS] = {
+    { 0,   '!', 0,   0,   0,   0,   ')'  },
+    { '@', '$', '%', 0,   '*', '&', 0    },
+    { '#', '\\','[', 0,   0,   '(', '^'  },
+    { '{', 0,   ']', 0,   '|', '<', 0    },
+    { '=', '~', '}', 0,   0,   '>', '`'  },
+};
+
+uint8_t s_kbDown[KB_COLS]   = {};   /* debounced state */
+uint8_t s_kbUpPend[KB_COLS] = {};   /* read open once; a second open read releases */
+uint8_t s_kbIgnore[KB_COLS] = {};   /* held at bring-up / wake: ignored until released */
+bool    s_kbResync          = true; /* the next frame's held keys go to s_kbIgnore */
+bool    s_altAlone          = false;/* Alt is down and nothing else has been pressed */
+bool    s_swallowed[LCD_KEY_COUNT] = {};   /* this press of a named key was claimed */
+int     s_repPos            = -1;   /* the repeating key, (col << 3) | row */
+uint32_t s_repCode          = 0;
+int64_t s_repNext           = 0;
+
+bool isHeld(uint8_t pos) { return s_kbDown[pos >> 3] & (1u << (pos & 7)); }
+
+/* The code a press produces under the modifiers held now (0 = nothing), and
+ * whether it repeats. */
+uint32_t rawCode(int c, int r, bool* repeats) {
+    const uint8_t pos  = (uint8_t)((c << 3) | r);
+    const bool shift   = isHeld(KP_LSHIFT) || isHeld(KP_RSHIFT);
+    const bool sym     = isHeld(KP_SYM);
+    const bool alt     = isHeld(KP_ALT);
+    *repeats = false;
+    if (pos == KP_ENTER) return LV_KEY_ENTER;
+    if (pos == KP_BACKSPACE) { *repeats = true; return sym ? LV_KEY_DEL : LV_KEY_BACKSPACE; }
+    if (pos == KP_SPACE && sym) return LV_KEY_NEXT;
+    const char base = kBase[c][r];
+    if (alt && base >= 'a' && base <= 'z') return LCD_KEY_CTRL | (uint32_t)base;
+    char ch = base;
+    if (sym) {
+        ch = shift && kShiftSym[c][r] ? kShiftSym[c][r] : kSym[c][r];
+        if (!ch) ch = (pos == KP_MIC) ? 0 : base;
+    } else if (shift && base >= 'a' && base <= 'z') {
+        ch = (char)(base - 'a' + 'A');
+    }
+    if (!ch) return 0;
+    *repeats = true;
+    return (uint32_t)(uint8_t)ch;
+}
+
+void stopRepeat() { s_repPos = -1; s_repCode = 0; }
+
+/* A typing key went down (not a modifier, not a swallowed named key). */
+void rawPress(int c, int r, int64_t now) {
+    const uint8_t pos = (uint8_t)((c << 3) | r);
+    if (isHeld(KP_ALT) && pos == KP_B) { stopRepeat(); return; }   /* the C3's lamp toggle */
+    bool repeats = false;
+    uint32_t code = rawCode(c, r, &repeats);
+    if (ctrlArmed(now)) {
+        s_ctrlUntil = 0;
+        if (code >= 'a' && code <= 'z') { code = LCD_KEY_CTRL | code; repeats = false; }
+    }
+    stopRepeat();
+    if (!code) return;
+    kbType(code);
+    if (repeats) { s_repPos = pos; s_repCode = code; s_repNext = now + REPEAT_DELAY_US; }
+}
+
+/* One debounced edge of switch (c,r). */
+void rawEdge(int c, int r, bool down, int64_t now) {
+    const uint8_t pos = (uint8_t)((c << 3) | r);
+    if (pos == KP_ALT) {
+        if (down) s_altAlone = true;
+        else if (s_altAlone) { s_altAlone = false; ctrlLeadIn(now); }
+        return;
+    }
+    if (down) s_altAlone = false;
+    if (pos == KP_SYM || pos == KP_LSHIFT || pos == KP_RSHIFT) return;
+
+    if (pos == KP_MIC || pos == KP_SPACE) {
+        const uint8_t k = pos == KP_MIC ? LCD_KEY_PTT : LCD_KEY_SPACE;
+        if (down) {
+            s_swallowed[k] = namedKeyEdge(k, true);
+            if (s_swallowed[k]) { if (s_repPos >= 0) stopRepeat(); return; }
+        } else {
+            namedKeyEdge(k, false);
+            if (s_swallowed[k]) { s_swallowed[k] = false; return; }
+        }
+    }
+    if (down) rawPress(c, r, now);
+    else if (s_repPos == pos) stopRepeat();
+}
+
+/* Release everything held, as if every key lifted (the poll task parks in
+ * standby and would otherwise sleep on a held push-to-talk). Whatever is still
+ * held on the way back is ignored until it is released. */
+void rawReleaseAll() {
+    const int64_t now = esp_timer_get_time();
+    s_altAlone = false;                 /* a release here is no Alt tap */
+    for (int c = 0; c < KB_COLS; c++)
+        for (int r = 0; r < KB_ROWS; r++)
+            if (s_kbDown[c] & (1u << r)) {
+                s_kbDown[c] &= (uint8_t)~(1u << r);
+                rawEdge(c, r, false, now);
+            }
+    for (int c = 0; c < KB_COLS; c++) s_kbUpPend[c] = 0;
+    stopRepeat();
+    s_kbResync = true;
+}
+
+/* A valid frame (no bit 7 anywhere) through ghost rejection, debounce, edges
+ * and repeat. Modifier edges go first so a key pressed in the same frame as its
+ * Shift is shifted; releases go before presses. */
+void rawFrame(const uint8_t in[KB_COLS], int64_t now) {
+    uint8_t f[KB_COLS];
+    memcpy(f, in, sizeof(f));
+
+    if (s_kbResync) {
+        s_kbResync = false;
+        for (int c = 0; c < KB_COLS; c++) { s_kbIgnore[c] = f[c]; s_kbDown[c] = 0; s_kbUpPend[c] = 0; }
+    }
+    for (int c = 0; c < KB_COLS; c++) {
+        s_kbIgnore[c] &= f[c];          /* released: no longer ignored */
+        f[c] &= (uint8_t)~s_kbIgnore[c];
+    }
+
+    uint8_t ghost[KB_COLS] = {};       /* from the unmasked frame: an ignored key still ghosts */
+    for (int a = 0; a < KB_COLS; a++)
+        for (int b = a + 1; b < KB_COLS; b++) {
+            uint8_t common = in[a] & in[b];
+            if (__builtin_popcount(common) >= 2) { ghost[a] |= common; ghost[b] |= common; }
+        }
+    for (int c = 0; c < KB_COLS; c++) f[c] &= (uint8_t)~(ghost[c] & ~s_kbDown[c]);
+
+    uint8_t pressed[KB_COLS], released[KB_COLS];
+    for (int c = 0; c < KB_COLS; c++) {
+        const uint8_t open = s_kbDown[c] & (uint8_t)~f[c];
+        released[c]    = open & s_kbUpPend[c];
+        s_kbUpPend[c]  = open & (uint8_t)~released[c];
+        pressed[c]     = f[c] & (uint8_t)~s_kbDown[c];
+    }
+    static const uint8_t kMods[] = { KP_SYM, KP_ALT, KP_LSHIFT, KP_RSHIFT };
+    for (uint8_t pos : kMods) {
+        const int c = pos >> 3; const uint8_t bit = (uint8_t)(1u << (pos & 7));
+        if (released[c] & bit) { released[c] &= (uint8_t)~bit; s_kbDown[c] &= (uint8_t)~bit; rawEdge(c, pos & 7, false, now); }
+        if (pressed[c] & bit)  { pressed[c]  &= (uint8_t)~bit; s_kbDown[c] |= bit;            rawEdge(c, pos & 7, true, now); }
+    }
+    for (int c = 0; c < KB_COLS; c++)
+        for (int r = 0; r < KB_ROWS; r++)
+            if (released[c] & (1u << r)) { s_kbDown[c] &= (uint8_t)~(1u << r); rawEdge(c, r, false, now); }
+    for (int c = 0; c < KB_COLS; c++)
+        for (int r = 0; r < KB_ROWS; r++)
+            if (pressed[c] & (1u << r)) { s_kbDown[c] |= (uint8_t)(1u << r); rawEdge(c, r, true, now); }
+
+    if (s_repPos >= 0) {
+        if (!isHeld((uint8_t)s_repPos)) stopRepeat();
+        else if (now >= s_repNext) { kbType(s_repCode); s_repNext = now + REPEAT_US; }
+    }
+}
+
+/* ---- mode probe and per-poll dispatch ---------------------------------------
+ *
+ * Which C3 is this? A raw-capable one (firmware from 2025-06-12) answers a
+ * 5-byte read after [0x03] with five column bitmaps, and only rows 0..6 exist,
+ * so bit 7 of every byte is 0. An older one ignores [0x03] and answers with one
+ * key byte and then garbage. The probe runs inside the poll's own cadence:
+ *   1. write [0x03] (retried each poll until the C3 ACKs);
+ *   2. read 5 bytes each poll; PROBE_RUN identical frames in a row with bit 7
+ *      clear is a raw C3. Identical rather than all-zero, so a key held through
+ *      boot does not fail it (its bits are ignored until it is released); the
+ *      first read after the switch may still carry the key-mode answer, and a
+ *      run tolerates that;
+ *   3. PROBE_FRAMES answered reads without such a run is a key-mode C3: write
+ *      [0x04] (harmless to one that never left key mode) and stay there;
+ *      PROBE_POLLS polls without enough answers is a C3 that is not talking —
+ *      key mode too, which is what an absent keyboard costs nothing in.
+ * Once in raw mode, RAW_LOST bad frames in a row (the C3 reset back to key
+ * mode) re-send [0x03], and RAW_GIVEUP of them drops to key mode. */
+constexpr int PROBE_RUN    = 3;
+constexpr int PROBE_FRAMES = 20;
+constexpr int PROBE_POLLS  = 100;
+constexpr int RAW_LOST     = 3;
+constexpr int RAW_GIVEUP   = 30;
+
+enum KbMode : uint8_t { KB_PROBING, KB_RAW, KB_KEY };
+KbMode  s_kbMode = KB_PROBING;
+bool    s_probeSent = false;
+int     s_probePolls = 0, s_probeFrames = 0, s_probeRun = 0, s_probeHigh = 0;
+uint8_t s_probeLast[KB_COLS] = {};
+int     s_rawBad = 0;
+
+bool frameValid(const uint8_t f[KB_COLS]) {
+    for (int c = 0; c < KB_COLS; c++) if (f[c] & 0x80) return false;
+    return true;
+}
+
+bool kbCmd(uint8_t cmd) { return i2c_master_transmit(s_kbd, &cmd, 1, 20) == ESP_OK; }
+
+void enterKeyMode(const char* why) {
+    kbCmd(BOARD_KB_CMD_MODE_KEY);
+    s_kbMode = KB_KEY;
+    lcdKeyDeclare(LCD_KEY_PTT);
+    lcdKeyUndeclare(LCD_KEY_SPACE);   /* key mode cannot see Space's up; raw mode may have declared it */
+    info("keyboard: key mode, %s; push-to-talk is Shift+Mic, latching\n", why);
+    storageSet("tdeck.keyboard", "key");
+}
+
+void probeStep() {
+    s_probePolls++;
+    if (!s_probeSent) {
+        s_probeSent = kbCmd(BOARD_KB_CMD_MODE_RAW);
+    } else {
+        uint8_t f[KB_COLS];
+        if (i2c_master_receive(s_kbd, f, sizeof(f), 10) == ESP_OK) {
+            s_probeFrames++;
+            if (!frameValid(f)) { s_probeHigh++; s_probeRun = 0; }
+            else if (s_probeRun && !memcmp(f, s_probeLast, sizeof(f))) s_probeRun++;
+            else s_probeRun = 1;
+            memcpy(s_probeLast, f, sizeof(f));
+            if (s_probeRun >= PROBE_RUN) {
+                s_kbMode    = KB_RAW;
+                s_kbResync  = true;
+                lcdKeyDeclare(LCD_KEY_PTT);
+                lcdKeyDeclare(LCD_KEY_SPACE);
+                info("keyboard: raw-matrix mode (%d identical frames, bit 7 clear, after %d reads)\n",
+                     PROBE_RUN, s_probeFrames);
+                storageSet("tdeck.keyboard", "raw");
+                rawFrame(f, esp_timer_get_time());
+                return;
+            }
+        }
+    }
+    if (s_probeFrames >= PROBE_FRAMES) {
+        char why[96];
+        snprintf(why, sizeof(why), "C3 firmware has no raw mode (%d of %d frames had bit 7 set)",
+                 s_probeHigh, s_probeFrames);
+        enterKeyMode(why);
+    } else if (s_probePolls >= PROBE_POLLS) {
+        enterKeyMode("C3 did not answer the probe");
+    }
+}
+
+void rawPoll() {
+    uint8_t f[KB_COLS];
+    if (i2c_master_receive(s_kbd, f, sizeof(f), 10) != ESP_OK) return;
+    const int64_t now = esp_timer_get_time();
+    if (!frameValid(f)) {
+        s_rawBad++;
+        if (s_rawBad == RAW_GIVEUP) { rawReleaseAll(); enterKeyMode("C3 stopped answering raw frames"); return; }
+        if (s_rawBad % RAW_LOST == 0) {
+            if (s_rawBad == RAW_LOST) warn("keyboard: bad raw frames; re-entering raw mode\n");
+            kbCmd(BOARD_KB_CMD_MODE_RAW);
+        }
+        return;
+    }
+    s_rawBad = 0;
+    static uint8_t last[KB_COLS] = {};
+    if (memcmp(f, last, sizeof(f))) {
+        dbg("kbraw: %02x %02x %02x %02x %02x\n", f[0], f[1], f[2], f[3], f[4]);
+        memcpy(last, f, sizeof(f));
+    }
+    rawFrame(f, now);
+}
+
+/* Poll task, each awake pass. */
+void kbPoll() {
+    if (!s_kbd) return;
+    /* kbint diagnostic: report a GPIO46 edge if one ever shows up. */
+    static uint32_t lastInt = 0;
+    uint32_t n = s_intCount;
+    if (n != lastInt) { dbg("kbint: GPIO%d fired (total %u)\n", BOARD_KB_INT_PIN, (unsigned)n); lastInt = n; }
+    switch (s_kbMode) {
+        case KB_PROBING: probeStep(); break;
+        case KB_RAW:     rawPoll();   break;
+        case KB_KEY:     kmPoll();    break;
+    }
+}
+
+/* Poll task, on the way into standby: nothing stays held while parked. */
+void kbPark() {
+    if (s_kbMode == KB_RAW) rawReleaseAll();
+    else if (s_kbMode == KB_KEY && s_kmPttLatched) {
+        s_kmPttLatched = false;
+        namedKeyEdge(LCD_KEY_PTT, false);
+    }
+}
+
+/* LVGL keypad read_cb (lcd task): one queued key code per call, press+release
  * synthesized over two reads; s_again asks kbDrain for another pass. */
 void readCb(lv_indev_t*, lv_indev_data_t* data) {
     static uint32_t held = 0;
-    /* Control prefix: the keyboard sends 0x0C for Alt-C; treat it as a one-shot
-     * "next lowercase letter is Ctrl-<letter>" lead-in (within 1 s), encoded
-     * with LCD_KEY_CTRL for the terminal to turn into a control byte. */
-    static TickType_t ctrlUntil = 0;
     if (held) { data->key = held; data->state = LV_INDEV_STATE_RELEASED; held = 0; s_again = true; return; }
-    uint8_t raw = 0;
-    if (s_queue && xQueueReceive(s_queue, &raw, 0) == pdTRUE && raw) {
+    uint32_t k = 0;
+    if (s_queue && xQueueReceive(s_queue, &k, 0) == pdTRUE && k) {
         s_again = true;
-        uint32_t k;
-        bool armed = ctrlUntil && (long)(ctrlUntil - xTaskGetTickCount()) > 0;
-        if (raw == 0x0C) {                          /* prefix */
-            if (armed) { ctrlUntil = 0; k = LV_KEY_ESC; }  /* Alt-C Alt-C -> ESC */
-            else { ctrlUntil = xTaskGetTickCount() + pdMS_TO_TICKS(1000); k = 0; }  /* arm for 1 s */
-        } else if (armed
-                   && raw >= 'a' && raw <= 'z') {
-            ctrlUntil = 0;
-            k = LCD_KEY_CTRL | raw;                 /* Ctrl-<letter> */
-        } else {
-            ctrlUntil = 0;
-            k = mapAsciiKey(raw);
-        }
-        if (k) {
-            /* Count the keystroke as activity (resets the inactivity blank timer).
-             * If it woke the screen, swallow it — the key only served to wake. */
-            if (lcdNotifyActivity()) { data->state = LV_INDEV_STATE_RELEASED; return; }
-            data->key = k; data->state = LV_INDEV_STATE_PRESSED; held = k; return;
-        }
+        /* Count the keystroke as activity (resets the inactivity blank timer).
+         * If it woke the screen, swallow it — the key only served to wake. */
+        if (lcdNotifyActivity()) { data->state = LV_INDEV_STATE_RELEASED; return; }
+        data->key = k; data->state = LV_INDEV_STATE_PRESSED; held = k; return;
     }
     data->state = LV_INDEV_STATE_RELEASED;
 }
@@ -1023,7 +1398,9 @@ void pollTask(void*) {
          * button is the only thing left to wake the device). tdeckStandby unparks
          * us with a notify. Park on a clean self-check, not a suspend, so we never
          * stop mid-I2C-transaction holding the shared bus. */
+        static bool parked = false;
         if (s_standby) {
+            if (!parked) { parked = true; kbPark(); }
             ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
             /* The screen's fade to dark runs on past the moment we park, and the
              * lamp has to follow it all the way down, so a parked task still
@@ -1040,18 +1417,12 @@ void pollTask(void*) {
         ulTaskNotifyTake(pdTRUE, s_touchDown ? TOUCH_PERIOD : POLL_PERIOD);
         kbBacklightPush();                 /* before the standby check: the fade starts here */
         if (s_standby) continue;           /* entered standby during the wait */
+        parked = false;
         /* Touch: sample the GT911 and, on a finger-down edge or a tap to replay,
          * bump the lcd task to read its (event-mode) touch indev. */
         if (tdeckTouchSample()) lcdTouchPoll();
-        /* Keyboard: drain up to a queueful per wake — bounded so a wedged keyboard
-         * that keeps returning a byte can't spin this task. */
-        for (int i = 0; i < 16; i++) {
-            uint32_t k = i2cReadKey();
-            if (!k) break;
-            uint8_t b = (uint8_t)k;
-            xQueueSend(s_queue, &b, 0);
-            s_drainOwed = true;
-        }
+        /* Keyboard: probe, raw frame or key-mode drain, by mode. */
+        kbPoll();
         /* Bump the lcd task to read our indev. The post is best-effort — a flash
          * flush can stall the lcd task past its send bound — and the bytes are in
          * the queue either way, so an owed drain is carried to the next pass (one
@@ -1211,8 +1582,8 @@ void TdeckLcdInput::onInit() {
         return;
     }
 
-    /* GPIO46 keyboard INT (ANYEDGE + pull-up). Dead on current C3 firmware, but
-     * if it ever fires kbIntIsr flips us to interrupt-driven. The gpio ISR
+    /* GPIO46 keyboard INT (ANYEDGE + pull-up). Dead on current C3 firmware; if
+     * it fires, kbIntIsr only wakes the poll task early. The gpio ISR
      * service is already installed by the board's lcd bring-up. */
     gpio_config_t io = {};
     io.pin_bit_mask = 1ULL << BOARD_KB_INT_PIN;
@@ -1223,7 +1594,7 @@ void TdeckLcdInput::onInit() {
     gpio_config(&io);
     gpio_isr_handler_add((gpio_num_t)BOARD_KB_INT_PIN, kbIntIsr, nullptr);
 
-    s_queue = xQueueCreate(16, 1);
+    s_queue = xQueueCreate(32, sizeof(uint32_t));
     lcdRun(kbCreateIndev);                  /* create the indev on the lcd task */
     /* Prio 6: one notch above the lcd task (prio 5) so the render can't starve
      * the poll on core 1 — the C3 holds only the last unread key, so a stalled
@@ -1233,7 +1604,7 @@ void TdeckLcdInput::onInit() {
      * render is what keeps touch sampling on cadence while the lcd task is busy
      * (the whole point of moving the read here). The scans are a few short I2C
      * transactions at 10–30 ms, so preempting the render costs it nothing. */
-    xTaskCreatePinnedToCore(pollTask, "kbpoll", 3072, nullptr, 6, &s_pollTask, 1);
+    xTaskCreatePinnedToCore(pollTask, "kbpoll", 4096, nullptr, 6, &s_pollTask, 1);
 
     lcdSetHasKeyboard(true);                /* lcd: suppress the on-screen keyboard */
 }
