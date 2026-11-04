@@ -391,13 +391,18 @@ I2S read/write engine; a board contributes Kconfig pins plus, for an
 I2C-controlled input codec, this slice. The ES7210 is a quad-mic ADC on I2C0
 @ 0x40 running as an **I2S slave** — the S3 (I2S0 master) supplies MCLK/BCLK/WS,
 the ES7210 just clocks ADC samples onto DIN once its registers are programmed. So
-`es7210InInit` is pure I2C register programming, no I2S; slave mode needs no
-sample-rate coefficient table (the chip derives serial clocks from the supplied
-BCLK/WS), so the init sequence is rate-independent. `TdeckAudio::onInit` (init band)
-only stows the `audio_codec_ops_t` with the engine via `audioRegisterCodec`; the
-audio task applies them lazily on first capture. The register table configures
-16-bit I2S-slave, all four mics at a fixed gain (regs 0x43–0x46), HPF on. Of the
-four hardware mics only one is populated on the board (the rest are unconnected).
+`es7210InInit` is pure I2C register programming, no I2S. The serial clocks come
+from BCLK/WS; the ADC runs off MCLK through MAINCLK (reg 0x02), and with the
+engine's MCLK at 256 fs, MAINCLK 0xC1 and OSR 32 give it 512 fs at any rate, so
+the init sequence is rate-independent. CLOCK_OFF (reg 0x01) must end at 0x00:
+0x14 there leaves ADC1, the board's microphone, unclocked, and the capture is
+near-silence (Opus frames of ~16 B on speech instead of ~40–50 B).
+`TdeckAudio::onInit` (init band) only stows the `audio_codec_ops_t` with the
+engine via `audioRegisterCodec`; the audio task applies them lazily on first
+capture. The register table follows the vendor's ES7210 bring-up: 16-bit
+I2S-slave, all four mics at 37.5 dB (regs 0x43–0x46), HPF on. Of the four
+hardware mics only MIC1 is populated, so the audio is ADC1, the left slot of
+SDOUT1, which is what the engine reads.
 
 ## 6. Pitfalls
 

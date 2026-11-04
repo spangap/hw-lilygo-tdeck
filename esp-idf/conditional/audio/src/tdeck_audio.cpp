@@ -12,12 +12,15 @@
  * esp-idf/conditional/audio/), and reached through the `when: spangap/audio`
  * TdeckAudio service, whose onInit just stows the ops pointer with the engine.
  *
- * BENCH-VERIFY: the register table below configures
- * the ES7210 for 16-bit I2S-slave operation with all four mics enabled at a
- * fixed gain. Slave mode needs no sample-rate coefficient table (the chip
- * derives its serial clocks from the externally supplied BCLK/WS), so the
- * sequence is rate-independent. Confirm clean capture on hardware and tune the
- * MIC gain (reg 0x43-0x46) to taste.
+ * The register table follows the vendor's ES7210 bring-up (Espressif's driver
+ * as LilyGo ships it for this board): 16-bit I2S slave, all four PGAs at
+ * 37.5 dB, HPF on. The board's one microphone is MIC1, so the audio is ADC1 in
+ * the left slot of SDOUT1, and CLOCK_OFF (reg 0x01) must end at 0x00: with
+ * 0x14 left in it ADC1 gets no clock and the capture is near-silence (Opus
+ * frames of ~16 B on speech). The serial clocks come from BCLK/WS; the ADC runs
+ * off MCLK through MAINCLK (reg 0x02), and with the engine's MCLK at 256 fs,
+ * MAINCLK 0xC1 (DLL, doubler, divide by 1) and OSR 32 give it 512 fs at any
+ * rate, so the sequence is rate-independent.
  */
 #include "audio.h"
 #include "tdeck.h"
@@ -52,37 +55,39 @@ static bool es7210Write(uint8_t reg, uint8_t val) {
   return i2c_master_transmit(dev, buf, sizeof(buf), 50) == ESP_OK;
 }
 
-/* ES7210 16-bit I2S-slave init: reset, clocks on, I2S/16-bit serial port,
- * HPF, analog bias, all four mics powered at a fixed gain. */
+/* ES7210 16-bit I2S-slave init: reset with the clocks gated, HPF, analog
+ * bias, the ADC clock, the serial port, all four mics at a fixed gain, then
+ * the clocks and power on. */
 static const uint8_t kEs7210Init[][2] = {
   {0x00, 0xFF},  /* RESET: assert reset on all blocks */
   {0x00, 0x41},  /* RESET: release; core powered */
-  {0x01, 0x1F},  /* CLOCK_ON: mclk / dclk / analog clock enabled */
-  {0x06, 0x00},  /* DIGITAL_PDN: nothing powered down */
-  {0x07, 0x20},  /* ADC OSR */
-  {0x08, 0x10},  /* MODE_CFG: I2S slave */
-  {0x09, 0x30},  /* TCT0 */
-  {0x0A, 0x30},  /* TCT1 */
-  {0x20, 0x0A},  /* ADC34 HPF stage1 */
-  {0x21, 0x2A},  /* ADC34 HPF stage2 */
-  {0x22, 0x0A},  /* ADC12 HPF stage1 */
+  {0x01, 0x3F},  /* CLOCK_OFF: everything gated while it is set up */
+  {0x09, 0x30},  /* TCT0: chip initial-state period */
+  {0x0A, 0x30},  /* TCT1: power-up state period */
   {0x23, 0x2A},  /* ADC12 HPF stage2 */
+  {0x22, 0x0A},  /* ADC12 HPF stage1 */
+  {0x20, 0x0A},  /* ADC34 HPF stage2 */
+  {0x21, 0x2A},  /* ADC34 HPF stage1 */
+  {0x08, 0x10},  /* MODE_CFG: I2S slave */
+  {0x40, 0x43},  /* ANALOG: VDDA 3.3 V, VMID 5 kΩ start */
+  {0x41, 0x70},  /* MIC1/2 bias 2.87 V */
+  {0x42, 0x70},  /* MIC3/4 bias 2.87 V */
+  {0x07, 0x20},  /* ADC OSR 32 */
+  {0x02, 0xC1},  /* MAINCLK: DLL, doubler, ADC div 1 — ADC clock 2 × MCLK (= 512 fs at MCLK 256 fs) */
   {0x11, 0x60},  /* SDP_CFG1: I2S format, 16-bit word length */
-  {0x12, 0x00},  /* SDP_CFG2 */
-  {0x40, 0x42},  /* ANALOG: vmid + bias */
-  {0x41, 0x70},  /* MIC1/2 bias */
-  {0x42, 0x70},  /* MIC3/4 bias */
-  {0x43, 0x1E},  /* MIC1 gain */
-  {0x44, 0x1E},  /* MIC2 gain */
-  {0x45, 0x1E},  /* MIC3 gain */
-  {0x46, 0x1E},  /* MIC4 gain */
+  {0x12, 0x00},  /* SDP_CFG2: ADC1/2 on SDOUT1, ADC3/4 on SDOUT2, no TDM */
+  {0x43, 0x1E},  /* MIC1 PGA on, 37.5 dB */
+  {0x44, 0x1E},  /* MIC2 PGA on, 37.5 dB */
+  {0x45, 0x1E},  /* MIC3 PGA on, 37.5 dB */
+  {0x46, 0x1E},  /* MIC4 PGA on, 37.5 dB */
+  {0x4B, 0x00},  /* MIC1/2 bias, ADC and PGA powered */
+  {0x4C, 0x00},  /* MIC3/4 bias, ADC and PGA powered */
+  {0x01, 0x00},  /* CLOCK_OFF: every clock running (0x14 starves ADC1: silence) */
+  {0x06, 0x00},  /* POWER_DOWN: nothing powered down */
   {0x47, 0x08},  /* MIC1 power */
   {0x48, 0x08},  /* MIC2 power */
   {0x49, 0x08},  /* MIC3 power */
   {0x4A, 0x08},  /* MIC4 power */
-  {0x4B, 0x00},  /* MIC12 LP/mute off */
-  {0x4C, 0x00},  /* MIC34 LP/mute off */
-  {0x01, 0x14},  /* CLOCK: final enable per ESP-ADF default */
 };
 
 static uint32_t es7210InInit(uint32_t rate) {
