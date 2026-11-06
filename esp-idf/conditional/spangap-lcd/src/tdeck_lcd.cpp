@@ -19,6 +19,7 @@
 #include "lcd_keys.h"
 #include "lcd.h"
 #include "storage.h"
+#include "cli.h"
 #include "log.h"
 #include "pm.h"
 
@@ -822,7 +823,8 @@ volatile uint32_t       s_intCount   = 0;          /* for the kbint diagnostic *
 /* Poll periods. In key mode the C3 holds only the last unread key (no buffer),
  * so any lazy backoff drops keystrokes under fast typing, and in raw mode the
  * C3's own scan takes ~35 ms, so polling faster gains nothing; standby parks the task, so the
- * always-on 30 ms scan costs nothing while the device sleeps. While a finger is
+ * always-on 30 ms scan costs nothing while the device sleeps, unless the talk key
+ * is claimed (a live session), when it keeps scanning for that key alone. While a finger is
  * down we scan faster so touch tracking (a drag / scroll) stays smooth — the
  * component re-reads the latch every 10 ms, so refresh it at a matching rate. */
 constexpr TickType_t POLL_PERIOD  = pdMS_TO_TICKS(30);
@@ -966,6 +968,15 @@ bool namedKeyEdge(uint8_t k, bool down) {
     return claimed;
 }
 
+/* A claimed press in standby wakes the screen on the same edge it keys with. */
+void namedKeyWake() {
+    if (s_standby) storageSet("sys.standby", 0);
+}
+
+/* Bit k: named key k held from the CLI (`key hold`); the poll task folds it
+ * into what it reads, so it takes the keyboard's own path. */
+volatile uint8_t s_simHeld = 0;
+
 /* ---- key mode (C3 firmware without raw mode) ----------------------------- */
 
 /* Key mode's Mic: alone it sends nothing, but Shift+Mic sends 0xE0 (the C3
@@ -979,10 +990,11 @@ void kmByte(uint8_t b) {
     const int64_t now = esp_timer_get_time();
     if (b == 0xE0) {
         if (s_kmPttLatched) { s_kmPttLatched = false; namedKeyEdge(LCD_KEY_PTT, false); }
-        else if (namedKeyEdge(LCD_KEY_PTT, true)) s_kmPttLatched = true;
+        else if (namedKeyEdge(LCD_KEY_PTT, true)) { s_kmPttLatched = true; namedKeyWake(); }
         else namedKeyEdge(LCD_KEY_PTT, false);
         return;
     }
+    if (s_standby) return;                            /* in standby only the talk key is live */
     if (b == 0x0C) { ctrlLeadIn(now); return; }       /* Alt-C */
     const bool armed = ctrlArmed(now);
     s_ctrlUntil = 0;
@@ -1002,6 +1014,10 @@ void kmPoll() {
         s_kmPttLatched = false;
         namedKeyEdge(LCD_KEY_PTT, false);
     }
+    /* A CLI hold of the talk key is a Shift+Mic toggle whenever the two differ. */
+    static bool simPtt = false;
+    const bool sim = s_simHeld & (1u << LCD_KEY_PTT);
+    if (sim != simPtt) { simPtt = sim; if (sim != s_kmPttLatched) kmByte(0xE0); }
     for (int i = 0; i < 16; i++) {
         uint8_t b = 0;
         if (i2c_master_receive(s_kbd, &b, 1, 10) != ESP_OK || !b) break;
@@ -1124,6 +1140,9 @@ void rawPress(int c, int r, int64_t now) {
 /* One debounced edge of switch (c,r). */
 void rawEdge(int c, int r, bool down, int64_t now) {
     const uint8_t pos = (uint8_t)((c << 3) | r);
+    /* In standby nothing types: a talk-key press is the only press that counts,
+     * and releases still land so a named key held from before comes up. */
+    if (s_standby && down && pos != KP_MIC) return;
     if (pos == KP_ALT) {
         if (down) s_altAlone = true;
         else if (s_altAlone) { s_altAlone = false; ctrlLeadIn(now); }
@@ -1136,13 +1155,13 @@ void rawEdge(int c, int r, bool down, int64_t now) {
         const uint8_t k = pos == KP_MIC ? LCD_KEY_PTT : LCD_KEY_SPACE;
         if (down) {
             s_swallowed[k] = namedKeyEdge(k, true);
-            if (s_swallowed[k]) { if (s_repPos >= 0) stopRepeat(); return; }
+            if (s_swallowed[k]) { if (s_repPos >= 0) stopRepeat(); namedKeyWake(); return; }
         } else {
             namedKeyEdge(k, false);
             if (s_swallowed[k]) { s_swallowed[k] = false; return; }
         }
     }
-    if (down) rawPress(c, r, now);
+    if (down) { if (!s_standby) rawPress(c, r, now); }
     else if (s_repPos == pos) stopRepeat();
 }
 
@@ -1309,6 +1328,9 @@ void rawPoll() {
         return;
     }
     s_rawBad = 0;
+    const uint8_t sim = s_simHeld;
+    if (sim & (1u << LCD_KEY_PTT))   f[KP_MIC >> 3]   |= (uint8_t)(1u << (KP_MIC & 7));
+    if (sim & (1u << LCD_KEY_SPACE)) f[KP_SPACE >> 3] |= (uint8_t)(1u << (KP_SPACE & 7));
     static uint8_t last[KB_COLS] = {};
     if (memcmp(f, last, sizeof(f))) {
         dbg("kbraw: %02x %02x %02x %02x %02x\n", f[0], f[1], f[2], f[3], f[4]);
@@ -1338,6 +1360,25 @@ void kbPark() {
         s_kmPttLatched = false;
         namedKeyEdge(LCD_KEY_PTT, false);
     }
+}
+
+/* Whether standby keeps scanning: while the talk key is claimed it stays live
+ * with the screen off, so one press both wakes the screen and keys. */
+bool kbStandbyWatch() {
+    return (s_kbMode == KB_RAW || s_kbMode == KB_KEY) && lcdKeyClaimed(LCD_KEY_PTT);
+}
+
+/* Poll task, entering the standby watch from awake: held keys stay tracked (a
+ * held talk key keeps talking), but nothing repeats or reads as an Alt tap. */
+void kbHush() {
+    stopRepeat();
+    s_altAlone = false;
+}
+
+/* lcdKeyOnClaimChange target (the claiming task): standby's scan depends on
+ * the talk key's claim, so a parked poll task re-decides. */
+void kbClaimChanged(uint8_t key, bool) {
+    if (key == LCD_KEY_PTT && s_pollTask) xTaskNotifyGive(s_pollTask);
 }
 
 /* LVGL keypad read_cb (lcd task): one queued key code per call, press+release
@@ -1394,14 +1435,20 @@ void IRAM_ATTR kbIntIsr(void*) {
 
 void pollTask(void*) {
     for (;;) {
-        /* Parked in standby: stop scanning the I2C keyboard entirely (the centre
-         * button is the only thing left to wake the device). tdeckStandby unparks
-         * us with a notify. Park on a clean self-check, not a suspend, so we never
-         * stop mid-I2C-transaction holding the shared bus. */
-        static bool parked = false;
+        /* Standby: parked, the I2C keyboard is not scanned at all (the centre
+         * button is the only thing left to wake the device); watching, while the
+         * talk key is claimed, it is scanned for that key alone, whose press
+         * keys and wakes at once. tdeckStandby unparks us with a notify, and a
+         * claim change re-decides. Park on a clean self-check, not a suspend, so
+         * we never stop mid-I2C-transaction holding the shared bus. */
+        static bool parked = false, watching = false;
         if (s_standby) {
-            if (!parked) { parked = true; kbPark(); }
-            ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+            if (kbStandbyWatch()) {
+                if (!watching) { if (!parked) kbHush(); watching = true; parked = false; }
+            } else if (!parked) {
+                parked = true; watching = false; kbPark();
+            }
+            ulTaskNotifyTake(pdTRUE, watching ? POLL_PERIOD : portMAX_DELAY);
             /* The screen's fade to dark runs on past the moment we park, and the
              * lamp has to follow it all the way down, so a parked task still
              * pushes. Each step of the fade notifies us and we park again. */
@@ -1410,6 +1457,7 @@ void pollTask(void*) {
              * to the lcd task): ask the controller whether a finger is really
              * there. */
             if (s_standby && s_touchWakeArmed && s_touchWakeFired) tdeckTouchWakeCheck();
+            if (s_standby && watching && kbStandbyWatch()) kbPoll();
             continue;
         }
         /* Woken by a touch/keyboard INT, or times out to poll. Faster cadence
@@ -1417,7 +1465,7 @@ void pollTask(void*) {
         ulTaskNotifyTake(pdTRUE, s_touchDown ? TOUCH_PERIOD : POLL_PERIOD);
         kbBacklightPush();                 /* before the standby check: the fade starts here */
         if (s_standby) continue;           /* entered standby during the wait */
-        parked = false;
+        parked = watching = false;
         /* Touch: sample the GT911 and, on a finger-down edge or a tap to replay,
          * bump the lcd task to read its (event-mode) touch indev. */
         if (tdeckTouchSample()) lcdTouchPoll();
@@ -1523,7 +1571,8 @@ static void tdeckTouchWakeCheck(void) {
 /* sys.standby subscription target (lcd task). The lcd component only flips the
  * key — on the inactivity timeout or our centre button; we decide what the device
  * actually does: display off, GT911 reads gated, keyboard scan parked. Only the
- * centre button is left live, and a press of it clears the key to wake us. */
+ * centre button is left live, and a press of it clears the key to wake us; a
+ * claimed talk key stays live too (pollTask), and its press wakes us the same way. */
 static void tdeckStandby(bool on) {
     if (on == s_standby) return;
     s_standby = on;
@@ -1567,6 +1616,41 @@ static void tdeckStandby(bool on) {
     }
 }
 
+/* `key`: the named held keys' state, and `key hold mic|space 1|0`, which holds
+ * or lifts one as the poll task reads it — the same scan, debounce, standby
+ * watch and report a finger on the key gets. */
+static void cliKey(const char* args) {
+    if (cliWantsHelp(args)) {
+        cliPrintf("%-*s held keys; hold mic|space 1|0 presses or lifts one\n", CLI_HELP_COL, "key [hold <k> 1|0]");
+        return;
+    }
+    char verb[8] = {}, name[8] = {};
+    int  down = -1;
+    if (sscanf(args, "%7s %7s %d", verb, name, &down) >= 1) {
+        uint8_t k;
+        if      (!strcmp(name, "mic") || !strcmp(name, "ptt")) k = LCD_KEY_PTT;
+        else if (!strcmp(name, "space"))                        k = LCD_KEY_SPACE;
+        else k = LCD_KEY_COUNT;
+        if (!cliVerbIs(verb, "hold", 1) || k == LCD_KEY_COUNT || (down != 0 && down != 1)) {
+            cliPrintf("usage: key hold mic|space 1|0\n");
+            return;
+        }
+        if (down) s_simHeld = (uint8_t)(s_simHeld | (1u << k));
+        else      s_simHeld = (uint8_t)(s_simHeld & ~(1u << k));
+        if (s_pollTask) xTaskNotifyGive(s_pollTask);
+        cliPrintf("%s %s\n", name, down ? "held" : "lifted");
+        return;
+    }
+    static const char* const kModes[] = { "probing", "raw", "key" };
+    cliPrintf("keyboard %s, %s\n", kModes[s_kbMode], s_standby ? "standby" : "awake");
+    for (uint8_t k = 0; k < LCD_KEY_COUNT; k++)
+        cliPrintf("  %-5s %s%s%s%s\n", namedKeyName(k),
+                  lcdKeyDeclared(k) ? "declared" : "undeclared",
+                  lcdKeyClaimed(k) ? ", claimed" : "",
+                  lcdKeyDown(k) ? ", down" : "",
+                  (s_simHeld & (1u << k)) ? ", held from cli" : "");
+}
+
 /* onInit — bring up the keyboard, AFTER spangapInit(): it needs the lcd task to
  * exist so it can create + drive its indev via lcdRun(). */
 void TdeckLcdInput::onInit() {
@@ -1605,6 +1689,8 @@ void TdeckLcdInput::onInit() {
      * (the whole point of moving the read here). The scans are a few short I2C
      * transactions at 10–30 ms, so preempting the render costs it nothing. */
     xTaskCreatePinnedToCore(pollTask, "kbpoll", 4096, nullptr, 6, &s_pollTask, 1);
+    lcdKeyOnClaimChange(kbClaimChanged);    /* standby's talk-key watch follows the claim */
+    cliRegisterCmd("key", cliKey);
 
     lcdSetHasKeyboard(true);                /* lcd: suppress the on-screen keyboard */
 }
