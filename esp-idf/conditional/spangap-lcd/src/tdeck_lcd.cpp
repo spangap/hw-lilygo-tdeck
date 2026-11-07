@@ -1273,6 +1273,7 @@ bool kbCmd(uint8_t cmd) { return i2c_master_transmit(s_kbd, &cmd, 1, 20) == ESP_
 void enterKeyMode(const char* why) {
     kbCmd(BOARD_KB_CMD_MODE_KEY);
     s_kbMode = KB_KEY;
+    lcdKeySetLabel(LCD_KEY_PTT, "Mic");
     lcdKeyDeclare(LCD_KEY_PTT);
     lcdKeyUndeclare(LCD_KEY_SPACE);   /* key mode cannot see Space's up; raw mode may have declared it */
     info("keyboard: key mode, %s; push-to-talk is Shift+Mic, latching\n", why);
@@ -1294,6 +1295,7 @@ void probeStep() {
             if (s_probeRun >= PROBE_RUN) {
                 s_kbMode    = KB_RAW;
                 s_kbResync  = true;
+                lcdKeySetLabel(LCD_KEY_PTT, "Mic");
                 lcdKeyDeclare(LCD_KEY_PTT);
                 lcdKeyDeclare(LCD_KEY_SPACE);
                 info("keyboard: raw-matrix mode (%d identical frames, bit 7 clear, after %d reads)\n",
